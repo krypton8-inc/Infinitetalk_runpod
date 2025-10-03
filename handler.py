@@ -8,6 +8,7 @@ import urllib.request
 import subprocess
 import websocket
 import librosa
+from urllib.parse import urlparse
 
 import runpod
 
@@ -24,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 SERVER_ADDRESS = os.getenv("SERVER_ADDRESS", "127.0.0.1")
 CLIENT_ID = str(uuid.uuid4())
+
+# Default sample assets (since /examples was removed)
+DEFAULT_IMAGE_URL = "https://krypton8.s3.us-east-1.amazonaws.com/test_image.png"
+DEFAULT_AUDIO_URL = "https://krypton8.s3.us-east-1.amazonaws.com/test_audio.wav"
 
 # -----------------------------
 # Helpers (downloads, S3, etc.)
@@ -49,6 +54,14 @@ def download_file_from_url(url: str, output_path: str) -> str:
     except Exception as e:
         logger.error(f"❌ Download error: {e}")
         raise Exception(f"Download error: {e}")
+
+def _out_with_ext(url: str, base_without_ext: str, default_ext: str = ".wav") -> str:
+    """
+    Build an output path preserving the extension from the URL path.
+    Falls back to default_ext if no extension is present.
+    """
+    ext = os.path.splitext(urlparse(url).path)[1] or default_ext
+    return base_without_ext + ext
 
 def ensure_url_only(field_name: str, job_input: dict) -> str | None:
     """
@@ -267,35 +280,37 @@ def handler(job):
     # URL-only media inputs
     media_local_path = None
     if input_type == "image":
-        image_url = ensure_url_only("image_url", job_input)
-        if image_url:
-            media_local_path = download_file_from_url(image_url, os.path.join(task_id, "input_image.jpg"))
-        else:
-            media_local_path = "/examples/image.jpg"  # fallback sample
-            logger.info("No image_url was provided; using bundled example image.")
+        image_url = ensure_url_only("image_url", job_input) or DEFAULT_IMAGE_URL
+        out_img = _out_with_ext(image_url, os.path.join(task_id, "input_image"), default_ext=".png")
+        media_local_path = download_file_from_url(image_url, out_img)
+        if not job_input.get("image_url"):
+            logger.info("No image_url was provided; using default test image URL.")
     else:
         video_url = ensure_url_only("video_url", job_input)
         if video_url:
-            media_local_path = download_file_from_url(video_url, os.path.join(task_id, "input_video.mp4"))
+            out_vid = _out_with_ext(video_url, os.path.join(task_id, "input_video"), default_ext=".mp4")
+            media_local_path = download_file_from_url(video_url, out_vid)
         else:
-            # For V2V, if no video_url is provided, we still allow a fallback image to drive I2V-like behavior
-            media_local_path = "/examples/image.jpg"
-            logger.info("No video_url was provided; falling back to bundled example image.")
+            # Fallback: use default test image to emulate I2V-like path (same as previous behavior)
+            image_url = DEFAULT_IMAGE_URL
+            out_img = _out_with_ext(image_url, os.path.join(task_id, "input_image"), default_ext=".png")
+            media_local_path = download_file_from_url(image_url, out_img)
+            logger.info("No video_url provided; falling back to default test image URL.")
 
     # Audio (URL-only)
     wav_path_1 = None
     wav_path_2 = None
-    wav_url = ensure_url_only("wav_url", job_input)
-    if wav_url:
-        wav_path_1 = download_file_from_url(wav_url, os.path.join(task_id, "input_audio.wav"))
-    else:
-        wav_path_1 = "/examples/audio.mp3"
-        logger.info("No wav_url provided; using bundled example audio.")
+    wav_url = ensure_url_only("wav_url", job_input) or DEFAULT_AUDIO_URL
+    out = _out_with_ext(wav_url, os.path.join(task_id, "input_audio"), default_ext=".wav")
+    wav_path_1 = download_file_from_url(wav_url, out)
+    if not job_input.get("wav_url"):
+        logger.info("No wav_url provided; using default test audio URL.")
 
     if person_count == "multi":
         wav_url_2 = ensure_url_only("wav_url_2", job_input)
         if wav_url_2:
-            wav_path_2 = download_file_from_url(wav_url_2, os.path.join(task_id, "input_audio_2.wav"))
+            out2 = _out_with_ext(wav_url_2, os.path.join(task_id, "input_audio_2"), default_ext=".wav")
+            wav_path_2 = download_file_from_url(wav_url_2, out2)
         else:
             wav_path_2 = wav_path_1
             logger.info("No wav_url_2 provided; using wav_url for both speakers.")
