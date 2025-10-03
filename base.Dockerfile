@@ -69,7 +69,7 @@ RUN pip install "misaki[en]" ninja psutil packaging
 RUN pip install -r requirements.txt
 
 # Extra runtime deps
-RUN pip install librosa ffmpeg onnx
+RUN pip install librosa ffmpeg onnx sageattention
 RUN pip uninstall -y transformers && pip install transformers==4.48.2
 
 # Serverless / infra helpers + HF fast transfer
@@ -80,4 +80,4 @@ RUN pip install runpod websocket-client && \
 # docker build -t krypton8/multitalk-base:1.0 -f base.Dockerfile .
 # docker push krypton8/multitalk-base:1.0
 
-# If you previously published 1.4, bump the tag to 1.5 after this change.
+# If you previously published 1.1, bump the tag to 1.2 after this change.

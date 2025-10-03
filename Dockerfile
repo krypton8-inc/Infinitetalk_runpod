@@ -1,5 +1,5 @@
 # Use specific version of nvidia cuda image
-FROM krypton8/multitalk-base:1.0 as runtime
+FROM krypton8/multitalk-base:1.1 as runtime
 
 # Keep things lean but ensure we can fetch models at build time
 RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
