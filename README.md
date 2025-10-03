@@ -54,18 +54,18 @@ You can target any of these classes on RunPod (or let RunPod choose). The worker
 
 All media inputs must be **URLs**.
 
-| Field          | Type    |       Required | Default                        | Description                         |
-| -------------- | ------- | -------------: | ------------------------------ | ----------------------------------- |
-| `input_type`   | string  |             no | `"image"`                      | `"image"` (I2V) or `"video"` (V2V)` |
-| `person_count` | string  |             no | `"single"`                     | `"single"` or `"multi"`             |
-| `image_url`    | string  |   _yes if I2V_ | —                              | Image URL for I2V                   |
-| `video_url`    | string  |   _yes if V2V_ | —                              | Video URL for V2V                   |
-| `wav_url`      | string  |            yes | —                              | Audio URL for first speaker         |
-| `wav_url_2`    | string  | _yes if multi_ | —                              | Audio URL for second speaker        |
-| `prompt`       | string  |             no | `"A person talking naturally"` | Text guidance                       |
-| `aspect_ratio` | string  |             no | `"9:16"`                       | `"16:9"` or `"9:16"`                |
-| `resolution`   | string  |             no | `"480p"`                       | `"480p"` or `"720p"`                |
-| `max_frame`    | integer |             no | auto from audio                | Maximum frames to render            |
+| Field          | Type    |       Required | Default                        | Description                        |
+| -------------- | ------- | -------------: | ------------------------------ | ---------------------------------- |
+| `input_type`   | string  |             no | `"image"`                      | `"image"` (I2V) or `"video"` (V2V) |
+| `person_count` | string  |             no | `"single"`                     | `"single"` or `"multi"`            |
+| `image_url`    | string  |   _yes if I2V_ | —                              | Image URL for I2V                  |
+| `video_url`    | string  |   _yes if V2V_ | —                              | Video URL for V2V                  |
+| `wav_url`      | string  |            yes | —                              | Audio URL for first speaker        |
+| `wav_url_2`    | string  | _yes if multi_ | —                              | Audio URL for second speaker       |
+| `prompt`       | string  |             no | `"A person talking naturally"` | Text guidance                      |
+| `aspect_ratio` | string  |             no | `"9:16"`                       | `"16:9"` or `"9:16"`               |
+| `resolution`   | string  |             no | `"480p"`                       | `"480p"` or `"720p"`               |
+| `max_frame`    | integer |             no | auto from audio                | Maximum frames to render           |
 
 ### Output
 
