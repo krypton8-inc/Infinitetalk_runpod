@@ -13,7 +13,7 @@
       "base_precision": "fp16_fast",
       "quantization": "disabled",
       "load_device": "offload_device",
-      "attention_mode": "auto",
+      "attention_mode": "sageattn",
       "block_swap_args": ["134", 0],
       "lora": ["138", 0],
       "multitalk_model": ["120", 0]
