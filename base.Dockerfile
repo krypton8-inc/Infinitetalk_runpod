@@ -80,4 +80,4 @@ RUN pip install runpod websocket-client && \
 # docker build -t krypton8/multitalk-base:1.0 -f base.Dockerfile .
 # docker push krypton8/multitalk-base:1.0
 
-# If you previously published 1.1, bump the tag to 1.2 after this change.
+# If you previously published 1.0, bump the tag to 1.1 after this change.

@@ -30,6 +30,11 @@ CLIENT_ID = str(uuid.uuid4())
 DEFAULT_IMAGE_URL = "https://krypton8.s3.us-east-1.amazonaws.com/test_image.png"
 DEFAULT_AUDIO_URL = "https://krypton8.s3.us-east-1.amazonaws.com/test_audio.wav"
 
+# Defaults specifically for multi-person inputs
+DEFAULT_MULTI_IMAGE_URL = "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_image.png"
+DEFAULT_MULTI_AUDIO_URL_1 = "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_audio.wav"
+DEFAULT_MULTI_AUDIO_URL_2 = "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_audio2.wav"
+
 # -----------------------------
 # Helpers (downloads, S3, etc.)
 # -----------------------------
@@ -236,7 +241,7 @@ def calculate_max_frames_from_audio(wav_1: str, wav_2: str | None = None, fps: i
     logger.info(f"Longest audio {max_duration:.2f}s -> max_frames {max_frames}")
     return max_frames
 
-def pick_dimensions(aspect_ratio: str | None, resolution: str | None, fallback_w: int, fallback_h: int) -> tuple[int, int]:
+def pick_dimensions(aspect_ratio: str | None, resolution: str | None) -> tuple[int, int]:
     """
     Choose (width, height) from aspect_ratio + resolution.
     Valid aspect_ratio: "16:9" or "9:16" (default 9:16 if missing/invalid).
@@ -249,8 +254,10 @@ def pick_dimensions(aspect_ratio: str | None, resolution: str | None, fallback_w
     res = (resolution or "480p").strip().lower()
 
     if ar not in {"16:9", "9:16"}:
+        logger.info(f"Invalid/missing aspect_ratio '{aspect_ratio}', defaulting to 9:16.")
         ar = "9:16"
     if res not in {"480p", "720p"}:
+        logger.info(f"Invalid/missing resolution '{resolution}', defaulting to 480p.")
         res = "480p"
 
     if ar == "16:9":
@@ -268,6 +275,10 @@ def handler(job):
     task_id = f"task_{uuid.uuid4()}"
     os.makedirs(task_id, exist_ok=True)
 
+    # Reject width/height if present; only aspect_ratio + resolution are allowed
+    if "width" in job_input or "height" in job_input:
+        raise Exception("Inputs 'width' and 'height' are not allowed. Use 'aspect_ratio' and 'resolution'.")
+
     # Input type & persons
     input_type = job_input.get("input_type", "image")          # "image" | "video"
     person_count = job_input.get("person_count", "single")     # "single" | "multi"
@@ -280,52 +291,47 @@ def handler(job):
     # URL-only media inputs
     media_local_path = None
     if input_type == "image":
-        image_url = ensure_url_only("image_url", job_input) or DEFAULT_IMAGE_URL
+        default_img = DEFAULT_MULTI_IMAGE_URL if person_count == "multi" else DEFAULT_IMAGE_URL
+        image_url = ensure_url_only("image_url", job_input) or default_img
         out_img = _out_with_ext(image_url, os.path.join(task_id, "input_image"), default_ext=".png")
         media_local_path = download_file_from_url(image_url, out_img)
         if not job_input.get("image_url"):
-            logger.info("No image_url was provided; using default test image URL.")
+            which = "multi default" if person_count == "multi" else "single default"
+            logger.info(f"No image_url was provided; using {which} image URL.")
     else:
         video_url = ensure_url_only("video_url", job_input)
-        if video_url:
-            out_vid = _out_with_ext(video_url, os.path.join(task_id, "input_video"), default_ext=".mp4")
-            media_local_path = download_file_from_url(video_url, out_vid)
-        else:
-            # Fallback: use default test image to emulate I2V-like path (same as previous behavior)
-            image_url = DEFAULT_IMAGE_URL
-            out_img = _out_with_ext(image_url, os.path.join(task_id, "input_image"), default_ext=".png")
-            media_local_path = download_file_from_url(image_url, out_img)
-            logger.info("No video_url provided; falling back to default test image URL.")
+        if not video_url:
+            return {"error": "For input_type='video', you must provide 'video_url'."}
+        out_vid = _out_with_ext(video_url, os.path.join(task_id, "input_video"), default_ext=".mp4")
+        media_local_path = download_file_from_url(video_url, out_vid)
 
     # Audio (URL-only)
     wav_path_1 = None
     wav_path_2 = None
-    wav_url = ensure_url_only("wav_url", job_input) or DEFAULT_AUDIO_URL
+
+    default_audio_1 = DEFAULT_MULTI_AUDIO_URL_1 if person_count == "multi" else DEFAULT_AUDIO_URL
+    wav_url = ensure_url_only("wav_url", job_input) or default_audio_1
     out = _out_with_ext(wav_url, os.path.join(task_id, "input_audio"), default_ext=".wav")
     wav_path_1 = download_file_from_url(wav_url, out)
     if not job_input.get("wav_url"):
-        logger.info("No wav_url provided; using default test audio URL.")
+        which = "multi default #1" if person_count == "multi" else "single default"
+        logger.info(f"No wav_url provided; using {which} audio URL.")
 
     if person_count == "multi":
-        wav_url_2 = ensure_url_only("wav_url_2", job_input)
-        if wav_url_2:
-            out2 = _out_with_ext(wav_url_2, os.path.join(task_id, "input_audio_2"), default_ext=".wav")
-            wav_path_2 = download_file_from_url(wav_url_2, out2)
-        else:
-            wav_path_2 = wav_path_1
-            logger.info("No wav_url_2 provided; using wav_url for both speakers.")
+        wav_url_2 = ensure_url_only("wav_url_2", job_input) or DEFAULT_MULTI_AUDIO_URL_2
+        out2 = _out_with_ext(wav_url_2, os.path.join(task_id, "input_audio_2"), default_ext=".wav")
+        wav_path_2 = download_file_from_url(wav_url_2, out2)
+        if not job_input.get("wav_url_2"):
+            logger.info("No wav_url_2 provided; using multi default #2 audio URL.")
 
-    # Text and size
+    # Text and derived size
     prompt_text = job_input.get("prompt", "A person talking naturally")
 
-    # Prefer aspect_ratio + resolution; else accept width/height if both provided; else default
+    # Always derive width/height from aspect_ratio + resolution (defaults: 9:16 @ 480p)
     ar = job_input.get("aspect_ratio")
     res = job_input.get("resolution")
-    if ar or res:
-        width, height = pick_dimensions(ar, res, 512, 512)
-    else:
-        width = int(job_input.get("width", 512))
-        height = int(job_input.get("height", 512))
+    width, height = pick_dimensions(ar, res)
+    logger.info(f"Using dimensions from aspect_ratio/resolution -> width={width}, height={height}")
 
     # max_frame auto by audio length unless user provides
     max_frame = job_input.get("max_frame")
@@ -387,7 +393,7 @@ def handler(job):
             urllib.request.urlopen(http_url, timeout=5)
             logger.info(f"HTTP connection OK (attempt {attempt+1})")
             break
-        except Exception as e:
+        except Exception:
             if attempt == 179:
                 raise Exception("Cannot reach ComfyUI HTTP endpoint.")
             time.sleep(1)
@@ -399,7 +405,7 @@ def handler(job):
             ws.connect(ws_url)
             logger.info(f"WebSocket connected (attempt {attempt+1})")
             break
-        except Exception as e:
+        except Exception:
             if attempt == 35:
                 raise Exception("WebSocket connect timeout (~3 min).")
             time.sleep(5)
