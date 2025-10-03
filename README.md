@@ -69,7 +69,7 @@ All media inputs must be **URLs**.
 
 ### Output
 
-- If S3 env vars are set: `{ "video_url": "s3://bucket/path/file.mp4" }`
+- If S3 env vars are set: `{ "video_url": "https://bucket/path/file.mp4" }`
 - Else: `{ "video": "data:video/mp4;base64,..." }`
 
 ---
