@@ -25,7 +25,7 @@
   "125": {
     "inputs": { "audio": "man.wav", "audioUI": "" },
     "class_type": "LoadAudio",
-    "_meta": { "title": "오디오 로드" }
+    "_meta": { "title": "Load Audio" }
   },
 
   "128": {
@@ -93,7 +93,7 @@
       "audio": ["194", 1]
     },
     "class_type": "VHS_VideoCombine",
-    "_meta": { "title": "Video Combine 🎥🅥🅗🅢" }
+    "_meta": { "title": "Video Combine" }
   },
 
   "134": {
@@ -191,7 +191,7 @@
       "format": "Wan"
     },
     "class_type": "VHS_LoadVideo",
-    "_meta": { "title": "Load Video (Upload) 🎥🅥🅗🅢" }
+    "_meta": { "title": "Load Video (Upload)" }
   },
 
   "229": {
@@ -255,7 +255,7 @@
   "238": {
     "inputs": { "clip_name": "clip_vision_h.safetensors" },
     "class_type": "CLIPVisionLoader",
-    "_meta": { "title": "CLIP_VISION 로드" }
+    "_meta": { "title": "Load CLIP Vision" }
   },
 
   "241": {
@@ -340,13 +340,13 @@
   "307": {
     "inputs": { "video_info": ["228", 3] },
     "class_type": "VHS_VideoInfo",
-    "_meta": { "title": "Video Info 🎥🅥🅗🅢" }
+    "_meta": { "title": "Video Info" }
   },
 
   "313": {
     "inputs": { "audio": "woman (1).wav", "audioUI": "" },
     "class_type": "LoadAudio",
-    "_meta": { "title": "오디오 로드" }
+    "_meta": { "title": "Load Audio" }
   },
 
   "314": {

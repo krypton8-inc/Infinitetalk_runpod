@@ -5,6 +5,7 @@ import time
 import base64
 import logging
 import urllib.request
+import urllib.error
 import subprocess
 import websocket
 import librosa
@@ -26,7 +27,8 @@ logger = logging.getLogger(__name__)
 SERVER_ADDRESS = os.getenv("SERVER_ADDRESS", "127.0.0.1")
 CLIENT_ID = str(uuid.uuid4())
 
-# Default sample assets (since /examples was removed)
+# Default sample assets - these are test assets hosted in a public S3 bucket
+# If your bucket becomes private, update these URLs or remove defaults entirely
 DEFAULT_IMAGE_URL = "https://krypton8.s3.us-east-1.amazonaws.com/test_image.png"
 DEFAULT_AUDIO_URL = "https://krypton8.s3.us-east-1.amazonaws.com/test_audio.wav"
 
@@ -48,16 +50,16 @@ def download_file_from_url(url: str, output_path: str) -> str:
             timeout=90,
         )
         if result.returncode == 0:
-            logger.info(f"✅ Downloaded: {url} -> {output_path}")
+            logger.info(f"Downloaded: {url} -> {output_path}")
             return output_path
         else:
-            logger.error(f"❌ wget failed: {result.stderr}")
+            logger.error(f"wget failed for {url}: {result.stderr}")
             raise Exception(f"URL download failed: {result.stderr}")
     except subprocess.TimeoutExpired:
-        logger.error("❌ Download timeout")
-        raise Exception("Download timeout")
+        logger.error(f"Download timeout for {url}")
+        raise Exception(f"Download timeout for {url}")
     except Exception as e:
-        logger.error(f"❌ Download error: {e}")
+        logger.error(f"Download error for {url}: {e}")
         raise Exception(f"Download error: {e}")
 
 def _out_with_ext(url: str, base_without_ext: str, default_ext: str = ".wav") -> str:
@@ -115,8 +117,15 @@ def s3_upload_and_url(file_path: str) -> str:
     basename = os.path.basename(file_path)
     key = f"{key_prefix.rstrip('/')}/{uuid.uuid4()}_{basename}"
 
+    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    
     c = s3_client()
     extra_args = {"ContentType": "video/mp4"}
+    
+    # Log progress for large files
+    if file_size_mb > 10:
+        logger.info(f"Uploading {file_size_mb:.1f}MB to S3: {key}")
+    
     c.upload_file(file_path, bucket, key, ExtraArgs=extra_args)
 
     public_base = os.getenv("S3_PUBLIC_BASE_URL")
@@ -159,9 +168,10 @@ def queue_prompt(prompt: dict, input_type="image", person_count="single"):
         logger.info(f"Prompt queued OK: {result}")
         return result
     except urllib.error.HTTPError as e:
+        error_body = e.read().decode('utf-8')
         logger.error(f"HTTP error: {e.code} - {e.reason}")
-        logger.error(f"Body: {e.read().decode('utf-8')}")
-        raise
+        logger.error(f"Response body: {error_body}")
+        raise Exception(f"ComfyUI HTTP {e.code}: {error_body}")
     except Exception as e:
         logger.error(f"Queue prompt error: {e}")
         raise
@@ -214,6 +224,33 @@ def get_workflow_path(input_type: str, person_count: str) -> str:
         return "/I2V_single.json" if person_count == "single" else "/I2V_multi.json"
     else:
         return "/V2V_single.json" if person_count == "single" else "/V2V_multi.json"
+
+def validate_workflow_nodes(prompt: dict, input_type: str, person_count: str) -> None:
+    """
+    Validate that required nodes exist in the workflow before execution.
+    Raises exception if critical nodes are missing.
+    """
+    required_nodes = ["125", "241", "245", "246", "270"]  # Audio, text, width, height, max_frame
+    
+    if input_type == "image":
+        required_nodes.append("284")  # Image input node
+    else:
+        required_nodes.append("228")  # Video input node
+    
+    if person_count == "multi":
+        # Check for second audio node (different IDs for I2V vs V2V)
+        if input_type == "image":
+            required_nodes.append("307")
+        else:
+            required_nodes.append("313")
+    
+    missing_nodes = [node for node in required_nodes if node not in prompt]
+    
+    if missing_nodes:
+        raise Exception(
+            f"Workflow validation failed: missing required nodes {missing_nodes}. "
+            f"Workflow may have been regenerated with different node IDs."
+        )
 
 def get_audio_duration(audio_path: str) -> float | None:
     try:
@@ -275,162 +312,177 @@ def handler(job):
     task_id = f"task_{uuid.uuid4()}"
     os.makedirs(task_id, exist_ok=True)
 
-    # Reject width/height if present; only aspect_ratio + resolution are allowed
-    if "width" in job_input or "height" in job_input:
-        raise Exception("Inputs 'width' and 'height' are not allowed. Use 'aspect_ratio' and 'resolution'.")
+    try:
+        # Reject width/height if present; only aspect_ratio + resolution are allowed
+        if "width" in job_input or "height" in job_input:
+            return {"error": "Inputs 'width' and 'height' are not allowed. Use 'aspect_ratio' and 'resolution'."}
 
-    # Input type & persons
-    input_type = job_input.get("input_type", "image")          # "image" | "video"
-    person_count = job_input.get("person_count", "single")     # "single" | "multi"
-    logger.info(f"Workflow: type={input_type}, persons={person_count}")
+        # Input type & persons
+        input_type = job_input.get("input_type", "image")          # "image" | "video"
+        person_count = job_input.get("person_count", "single")     # "single" | "multi"
+        
+        if input_type not in {"image", "video"}:
+            return {"error": f"Invalid input_type '{input_type}'. Must be 'image' or 'video'."}
+        if person_count not in {"single", "multi"}:
+            return {"error": f"Invalid person_count '{person_count}'. Must be 'single' or 'multi'."}
+        
+        logger.info(f"Workflow: type={input_type}, persons={person_count}")
 
-    # Workflow
-    workflow_path = get_workflow_path(input_type, person_count)
-    logger.info(f"Using workflow: {workflow_path}")
+        # Workflow
+        workflow_path = get_workflow_path(input_type, person_count)
+        logger.info(f"Using workflow: {workflow_path}")
 
-    # URL-only media inputs
-    media_local_path = None
-    if input_type == "image":
-        default_img = DEFAULT_MULTI_IMAGE_URL if person_count == "multi" else DEFAULT_IMAGE_URL
-        image_url = ensure_url_only("image_url", job_input) or default_img
-        out_img = _out_with_ext(image_url, os.path.join(task_id, "input_image"), default_ext=".png")
-        media_local_path = download_file_from_url(image_url, out_img)
-        if not job_input.get("image_url"):
-            which = "multi default" if person_count == "multi" else "single default"
-            logger.info(f"No image_url was provided; using {which} image URL.")
-    else:
-        video_url = ensure_url_only("video_url", job_input)
-        if not video_url:
-            return {"error": "For input_type='video', you must provide 'video_url'."}
-        out_vid = _out_with_ext(video_url, os.path.join(task_id, "input_video"), default_ext=".mp4")
-        media_local_path = download_file_from_url(video_url, out_vid)
+        # URL-only media inputs
+        media_local_path = None
+        if input_type == "image":
+            default_img = DEFAULT_MULTI_IMAGE_URL if person_count == "multi" else DEFAULT_IMAGE_URL
+            image_url = ensure_url_only("image_url", job_input) or default_img
+            out_img = _out_with_ext(image_url, os.path.join(task_id, "input_image"), default_ext=".png")
+            media_local_path = download_file_from_url(image_url, out_img)
+            if not job_input.get("image_url"):
+                which = "multi default" if person_count == "multi" else "single default"
+                logger.info(f"No image_url was provided; using {which} image URL.")
+        else:
+            video_url = ensure_url_only("video_url", job_input)
+            if not video_url:
+                return {"error": "For input_type='video', you must provide 'video_url'."}
+            out_vid = _out_with_ext(video_url, os.path.join(task_id, "input_video"), default_ext=".mp4")
+            media_local_path = download_file_from_url(video_url, out_vid)
 
-    # Audio (URL-only)
-    wav_path_1 = None
-    wav_path_2 = None
+        # Audio (URL-only)
+        wav_path_1 = None
+        wav_path_2 = None
 
-    default_audio_1 = DEFAULT_MULTI_AUDIO_URL_1 if person_count == "multi" else DEFAULT_AUDIO_URL
-    wav_url = ensure_url_only("wav_url", job_input) or default_audio_1
-    out = _out_with_ext(wav_url, os.path.join(task_id, "input_audio"), default_ext=".wav")
-    wav_path_1 = download_file_from_url(wav_url, out)
-    if not job_input.get("wav_url"):
-        which = "multi default #1" if person_count == "multi" else "single default"
-        logger.info(f"No wav_url provided; using {which} audio URL.")
+        default_audio_1 = DEFAULT_MULTI_AUDIO_URL_1 if person_count == "multi" else DEFAULT_AUDIO_URL
+        wav_url = ensure_url_only("wav_url", job_input) or default_audio_1
+        out = _out_with_ext(wav_url, os.path.join(task_id, "input_audio"), default_ext=".wav")
+        wav_path_1 = download_file_from_url(wav_url, out)
+        if not job_input.get("wav_url"):
+            which = "multi default #1" if person_count == "multi" else "single default"
+            logger.info(f"No wav_url provided; using {which} audio URL.")
 
-    if person_count == "multi":
-        wav_url_2 = ensure_url_only("wav_url_2", job_input) or DEFAULT_MULTI_AUDIO_URL_2
-        out2 = _out_with_ext(wav_url_2, os.path.join(task_id, "input_audio_2"), default_ext=".wav")
-        wav_path_2 = download_file_from_url(wav_url_2, out2)
-        if not job_input.get("wav_url_2"):
-            logger.info("No wav_url_2 provided; using multi default #2 audio URL.")
+        if person_count == "multi":
+            wav_url_2 = ensure_url_only("wav_url_2", job_input) or DEFAULT_MULTI_AUDIO_URL_2
+            out2 = _out_with_ext(wav_url_2, os.path.join(task_id, "input_audio_2"), default_ext=".wav")
+            wav_path_2 = download_file_from_url(wav_url_2, out2)
+            if not job_input.get("wav_url_2"):
+                logger.info("No wav_url_2 provided; using multi default #2 audio URL.")
 
-    # Text and derived size
-    prompt_text = job_input.get("prompt", "A person talking naturally")
+        # Text and derived size
+        prompt_text = job_input.get("prompt", "A person talking naturally")
 
-    # Always derive width/height from aspect_ratio + resolution (defaults: 9:16 @ 480p)
-    ar = job_input.get("aspect_ratio")
-    res = job_input.get("resolution")
-    width, height = pick_dimensions(ar, res)
-    logger.info(f"Using dimensions from aspect_ratio/resolution -> width={width}, height={height}")
+        # Always derive width/height from aspect_ratio + resolution (defaults: 9:16 @ 480p)
+        ar = job_input.get("aspect_ratio")
+        res = job_input.get("resolution")
+        width, height = pick_dimensions(ar, res)
+        logger.info(f"Using dimensions from aspect_ratio/resolution -> width={width}, height={height}")
 
-    # max_frame auto by audio length unless user provides
-    max_frame = job_input.get("max_frame")
-    if max_frame is None:
-        logger.info("max_frame not provided; deriving from audio duration.")
-        max_frame = calculate_max_frames_from_audio(wav_path_1, wav_path_2 if person_count == "multi" else None)
-    else:
-        logger.info(f"Using user-specified max_frame: {max_frame}")
+        # max_frame auto by audio length unless user provides
+        max_frame = job_input.get("max_frame")
+        if max_frame is None:
+            logger.info("max_frame not provided; deriving from audio duration.")
+            max_frame = calculate_max_frames_from_audio(wav_path_1, wav_path_2 if person_count == "multi" else None)
+        else:
+            logger.info(f"Using user-specified max_frame: {max_frame}")
 
-    logger.info(f"Settings: prompt='{prompt_text}', width={width}, height={height}, max_frame={max_frame}")
-    logger.info(f"Media path: {media_local_path}")
-    logger.info(f"Audio #1: {wav_path_1}")
-    if person_count == "multi":
-        logger.info(f"Audio #2: {wav_path_2}")
+        logger.info(f"Settings: prompt='{prompt_text}', width={width}, height={height}, max_frame={max_frame}")
+        logger.info(f"Media path: {media_local_path}")
+        logger.info(f"Audio #1: {wav_path_1}")
+        if person_count == "multi":
+            logger.info(f"Audio #2: {wav_path_2}")
 
-    # Load and fill workflow
-    prompt = load_workflow(workflow_path)
+        # Load and fill workflow
+        prompt = load_workflow(workflow_path)
+        
+        # Validate workflow has required nodes
+        validate_workflow_nodes(prompt, input_type, person_count)
 
-    # Existence checks
-    if not os.path.exists(media_local_path):
-        return {"error": f"Media file not found: {media_local_path}"}
-    if not os.path.exists(wav_path_1):
-        return {"error": f"Audio file not found: {wav_path_1}"}
-    if person_count == "multi" and wav_path_2 and not os.path.exists(wav_path_2):
-        return {"error": f"Second audio file not found: {wav_path_2}"}
+        # Existence checks
+        if not os.path.exists(media_local_path):
+            return {"error": f"Media file not found: {media_local_path}"}
+        if not os.path.exists(wav_path_1):
+            return {"error": f"Audio file not found: {wav_path_1}"}
+        if person_count == "multi" and wav_path_2 and not os.path.exists(wav_path_2):
+            return {"error": f"Second audio file not found: {wav_path_2}"}
 
-    logger.info(f"Media size: {os.path.getsize(media_local_path)} bytes")
-    logger.info(f"Audio #1 size: {os.path.getsize(wav_path_1)} bytes")
-    if person_count == "multi" and wav_path_2:
-        logger.info(f"Audio #2 size: {os.path.getsize(wav_path_2)} bytes")
+        logger.info(f"Media size: {os.path.getsize(media_local_path)} bytes")
+        logger.info(f"Audio #1 size: {os.path.getsize(wav_path_1)} bytes")
+        if person_count == "multi" and wav_path_2:
+            logger.info(f"Audio #2 size: {os.path.getsize(wav_path_2)} bytes")
 
-    # Bind inputs to workflow
-    if input_type == "image":
-        prompt["284"]["inputs"]["image"] = media_local_path
-    else:
-        prompt["228"]["inputs"]["video"] = media_local_path
+        # Bind inputs to workflow
+        if input_type == "image":
+            prompt["284"]["inputs"]["image"] = media_local_path
+        else:
+            prompt["228"]["inputs"]["video"] = media_local_path
 
-    prompt["125"]["inputs"]["audio"] = wav_path_1
-    prompt["241"]["inputs"]["positive_prompt"] = prompt_text
-    prompt["245"]["inputs"]["value"] = width
-    prompt["246"]["inputs"]["value"] = height
-    prompt["270"]["inputs"]["value"] = max_frame
+        prompt["125"]["inputs"]["audio"] = wav_path_1
+        prompt["241"]["inputs"]["positive_prompt"] = prompt_text
+        prompt["245"]["inputs"]["value"] = width
+        prompt["246"]["inputs"]["value"] = height
+        prompt["270"]["inputs"]["value"] = max_frame
 
-    if person_count == "multi":
-        # I2V_multi.json uses node 307, V2V_multi.json uses node 313
-        if input_type == "image" and "307" in prompt:
-            prompt["307"]["inputs"]["audio"] = wav_path_2
-        elif input_type == "video" and "313" in prompt:
-            prompt["313"]["inputs"]["audio"] = wav_path_2
+        if person_count == "multi":
+            # I2V_multi.json uses node 307, V2V_multi.json uses node 313
+            audio_2_node = "307" if input_type == "image" else "313"
+            if audio_2_node not in prompt:
+                return {"error": f"Expected node {audio_2_node} not found in {input_type} multi workflow"}
+            prompt[audio_2_node]["inputs"]["audio"] = wav_path_2
 
-    # Connectivity checks
-    ws_url = f"ws://{SERVER_ADDRESS}:8188/ws?clientId={CLIENT_ID}"
-    http_url = f"http://{SERVER_ADDRESS}:8188/"
-    logger.info(f"Connecting to ComfyUI: {http_url} (ws={ws_url})")
+        # Connectivity checks
+        ws_url = f"ws://{SERVER_ADDRESS}:8188/ws?clientId={CLIENT_ID}"
+        http_url = f"http://{SERVER_ADDRESS}:8188/"
+        logger.info(f"Connecting to ComfyUI: {http_url} (ws={ws_url})")
 
-    # Wait for HTTP up (<= 3 min)
-    for attempt in range(180):
-        try:
-            urllib.request.urlopen(http_url, timeout=5)
-            logger.info(f"HTTP connection OK (attempt {attempt+1})")
-            break
-        except Exception:
-            if attempt == 179:
-                raise Exception("Cannot reach ComfyUI HTTP endpoint.")
-            time.sleep(1)
+        # Wait for HTTP up (<= 5 min for cold starts)
+        for attempt in range(300):
+            try:
+                urllib.request.urlopen(http_url, timeout=5)
+                logger.info(f"HTTP connection OK (attempt {attempt+1})")
+                break
+            except Exception:
+                if attempt == 299:
+                    raise Exception("Cannot reach ComfyUI HTTP endpoint after 5 minutes.")
+                time.sleep(1)
 
-    # WS connect
-    ws = websocket.WebSocket()
-    for attempt in range(36):  # up to ~3 min (5s backoff)
-        try:
-            ws.connect(ws_url)
-            logger.info(f"WebSocket connected (attempt {attempt+1})")
-            break
-        except Exception:
-            if attempt == 35:
-                raise Exception("WebSocket connect timeout (~3 min).")
-            time.sleep(5)
+        # WS connect (up to 5 min)
+        ws = websocket.WebSocket()
+        for attempt in range(60):  # 5s × 60 = 5 min
+            try:
+                ws.connect(ws_url)
+                logger.info(f"WebSocket connected (attempt {attempt+1})")
+                break
+            except Exception as e:
+                if attempt == 59:
+                    raise Exception(f"WebSocket connect timeout after 5 minutes. Last error: {e}")
+                time.sleep(5)
 
-    # Run and collect output paths
-    video_paths_by_node = get_video_filepaths(ws, prompt, input_type, person_count)
-    ws.close()
+        # Run and collect output paths
+        video_paths_by_node = get_video_filepaths(ws, prompt, input_type, person_count)
+        ws.close()
 
-    # Return the first available video
-    for node_id, paths in video_paths_by_node.items():
-        for p in paths:
-            if os.path.exists(p):
-                if s3_configured():
-                    try:
-                        url = s3_upload_and_url(p)
-                        logger.info(f"Uploaded to S3: {url}")
-                        return {"video_url": url}
-                    except Exception as e:
-                        logger.error(f"S3 upload failed, falling back to base64. Error: {e}")
+        # Return the first available video
+        for node_id, paths in video_paths_by_node.items():
+            for p in paths:
+                if os.path.exists(p):
+                    if s3_configured():
+                        try:
+                            url = s3_upload_and_url(p)
+                            logger.info(f"Uploaded to S3: {url}")
+                            return {"video_url": url}
+                        except Exception as e:
+                            logger.error(f"S3 upload failed, falling back to base64. Error: {e}")
 
-                # Fallback: base64 data URL
-                with open(p, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode("utf-8")
-                return {"video": f"data:video/mp4;base64,{b64}"}
+                    # Fallback: base64 data URL
+                    with open(p, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("utf-8")
+                    logger.info(f"Returning base64 video ({len(b64)} chars)")
+                    return {"video": f"data:video/mp4;base64,{b64}"}
 
-    return {"error": "No video file was produced by the workflow."}
+        return {"error": "No video file was produced by the workflow."}
+
+    except Exception as e:
+        logger.error(f"Handler error: {e}", exc_info=True)
+        return {"error": str(e)}
 
 runpod.serverless.start({"handler": handler})

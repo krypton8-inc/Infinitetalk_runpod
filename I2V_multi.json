@@ -31,7 +31,7 @@
     },
     "class_type": "LoadAudio",
     "_meta": {
-      "title": "오디오 로드"
+      "title": "Load Audio"
     }
   },
   "128": {
@@ -102,7 +102,7 @@
     },
     "class_type": "VHS_VideoCombine",
     "_meta": {
-      "title": "Video Combine 🎥🅥🅗🅢"
+      "title": "Video Combine"
     }
   },
   "134": {
@@ -217,7 +217,7 @@
     },
     "class_type": "CLIPVisionLoader",
     "_meta": {
-      "title": "CLIP_VISION 로드"
+      "title": "Load CLIP Vision"
     }
   },
   "241": {
@@ -285,7 +285,7 @@
     },
     "class_type": "LoadImage",
     "_meta": {
-      "title": "이미지 로드"
+      "title": "Load Image"
     }
   },
   "291": {
@@ -304,7 +304,7 @@
     },
     "class_type": "PreviewAny",
     "_meta": {
-      "title": "미리보기 아무거나"
+      "title": "Preview Any"
     }
   },
   "301": {
@@ -343,7 +343,7 @@
     },
     "class_type": "LoadAudio",
     "_meta": {
-      "title": "오디오 로드"
+      "title": "Load Audio"
     }
   }
 }

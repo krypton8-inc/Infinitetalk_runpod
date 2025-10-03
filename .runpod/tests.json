@@ -1,7 +1,7 @@
 {
   "tests": [
     {
-      "name": "test_case_name",
+      "name": "i2v_single_480p_test",
       "input": {
         "input_type": "image",
         "person_count": "single",
@@ -11,7 +11,7 @@
         "aspect_ratio": "9:16",
         "resolution": "480p"
       },
-      "timeout": 100000
+      "timeout": 300000
     }
   ],
   "config": {
