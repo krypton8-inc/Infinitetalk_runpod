@@ -221,13 +221,13 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81) -> dict:
         
     elif vram_mb >= 30000:
         # High VRAM (30-39GB): Optimized for RTX 5090, 4090, A6000
-        logger.info("High VRAM mode (30-39GB): Optimized for RTX 5090/4090 - no offloading, no tiling, aggressive prefetch")
+        logger.info("High VRAM mode (30-39GB): Optimized for RTX 5090/4090 - VAE tiling enabled for safety")
         force_offload = False
-        tiled_vae = False
-        enable_vae_tiling = False
-        blocks_to_swap = 8   # Aggressive block management
-        prefetch_blocks = 3  # Maximum prefetching for speed
-        frame_window_size = 97  # Balanced window size
+        tiled_vae = True     # Enable VAE tiling to prevent OOM
+        enable_vae_tiling = True
+        blocks_to_swap = 12  # Moderate block management for safety
+        prefetch_blocks = 2  # Conservative prefetching
+        frame_window_size = 81  # Safe window size
         
     elif vram_mb >= 24000:
         # Medium VRAM (24-29GB): Balanced with smaller windows for speed
@@ -249,22 +249,18 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81) -> dict:
         prefetch_blocks = 2
         frame_window_size = 65  # Smaller window for memory savings
     
-    # For very long videos, use optimized window sizes based on VRAM
-    # RTX 5090 with 32GB can handle larger windows even for long videos
+    # For very long videos, reduce window size to prevent OOM
     if max_frames > 1000:
-        # Very long videos (>40 seconds)
-        logger.info(f"Very long video detected ({max_frames} frames), optimizing window size")
-        if vram_mb >= 30000:
-            frame_window_size = 81  # RTX 5090 can handle 81 even for very long videos
-        else:
-            frame_window_size = 65  # More conservative for lower VRAM
+        # Very long videos (>40 seconds) - use conservative settings
+        logger.info(f"Very long video detected ({max_frames} frames), using conservative window size")
+        frame_window_size = 65  # Small window for all GPUs to prevent OOM
     elif max_frames > 400:
-        # Long videos (16-40 seconds)
-        logger.info(f"Long video detected ({max_frames} frames), using optimized window size")
+        # Long videos (16-40 seconds) - moderate settings
+        logger.info(f"Long video detected ({max_frames} frames), using moderate window size")
         if vram_mb >= 30000:
-            frame_window_size = min(frame_window_size, 97)  # RTX 5090 can use 97
+            frame_window_size = min(frame_window_size, 81)  # Cap at 81
         else:
-            frame_window_size = min(frame_window_size, 81)  # Cap at 81 for others
+            frame_window_size = min(frame_window_size, 65)  # More conservative
     
     # Optimize inference steps for very long videos to maintain reasonable generation times
     # RTX 5090's high performance allows us to use slightly lower steps without major quality loss
