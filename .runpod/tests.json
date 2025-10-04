@@ -1,8 +1,9 @@
 {
   "tests": [
     {
-      "name": "i2v_single_480p_test",
+      "name": "balanced_480p_single",
       "input": {
+        "speed_mode": "balanced",
         "input_type": "image",
         "person_count": "single",
         "prompt": "A person is talking naturally.",
@@ -11,11 +12,12 @@
         "aspect_ratio": "9:16",
         "resolution": "480p"
       },
-      "timeout": 300000
+      "timeout": 180000
     },
     {
-      "name": "i2v_single_720p_test",
+      "name": "balanced_720p_single",
       "input": {
+        "speed_mode": "balanced",
         "input_type": "image",
         "person_count": "single",
         "prompt": "A person speaking with excellent quality.",
@@ -24,11 +26,12 @@
         "aspect_ratio": "16:9",
         "resolution": "720p"
       },
-      "timeout": 600000
+      "timeout": 360000
     },
     {
-      "name": "i2v_multi_720p_test",
+      "name": "balanced_720p_multi",
       "input": {
+        "speed_mode": "balanced",
         "input_type": "image",
         "person_count": "multi",
         "prompt": "Two people having an energetic conversation.",
@@ -38,7 +41,64 @@
         "aspect_ratio": "16:9",
         "resolution": "720p"
       },
-      "timeout": 900000
+      "timeout": 540000
+    },
+    {
+      "name": "fast_720p_multi",
+      "input": {
+        "speed_mode": "fast",
+        "input_type": "image",
+        "person_count": "multi",
+        "prompt": "Two people having a conversation.",
+        "image_url": "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_image.png",
+        "wav_url": "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_audio.wav",
+        "wav_url_2": "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_audio2.wav",
+        "aspect_ratio": "16:9",
+        "resolution": "720p"
+      },
+      "timeout": 360000
+    },
+    {
+      "name": "turbo_480p_single",
+      "input": {
+        "speed_mode": "turbo",
+        "input_type": "image",
+        "person_count": "single",
+        "prompt": "A person talking.",
+        "image_url": "https://krypton8.s3.us-east-1.amazonaws.com/test_image.png",
+        "wav_url": "https://krypton8.s3.us-east-1.amazonaws.com/test_audio.wav",
+        "aspect_ratio": "9:16",
+        "resolution": "480p"
+      },
+      "timeout": 120000
+    },
+    {
+      "name": "maximum_quality_720p_single",
+      "input": {
+        "speed_mode": "maximum_quality",
+        "input_type": "image",
+        "person_count": "single",
+        "prompt": "A person speaking with maximum detail.",
+        "image_url": "https://krypton8.s3.us-east-1.amazonaws.com/test_image.png",
+        "wav_url": "https://krypton8.s3.us-east-1.amazonaws.com/test_audio.wav",
+        "aspect_ratio": "16:9",
+        "resolution": "720p"
+      },
+      "timeout": 600000
+    },
+    {
+      "name": "v2v_fast_mode",
+      "input": {
+        "speed_mode": "fast",
+        "input_type": "video",
+        "person_count": "single",
+        "prompt": "A person talking in a video.",
+        "video_url": "https://krypton8.s3.us-east-1.amazonaws.com/test_video.mp4",
+        "wav_url": "https://krypton8.s3.us-east-1.amazonaws.com/test_audio.wav",
+        "aspect_ratio": "16:9",
+        "resolution": "720p"
+      },
+      "timeout": 360000
     }
   ],
   "config": {

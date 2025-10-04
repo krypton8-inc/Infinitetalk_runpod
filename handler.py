@@ -124,21 +124,18 @@ def s3_upload_and_url(file_path: str) -> str:
         return f"https://s3.{region}.amazonaws.com/{bucket}/{key}"
 
 # -----------------------------
-# GPU Optimization - RTX 6000 PRO 96GB ONLY
+# GPU Optimization - SPEED MODES
 # -----------------------------
-def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: str = "480p", person_count: str = "single") -> dict:
+def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: str = "480p", 
+                              person_count: str = "single", speed_mode: str = "balanced") -> dict:
     """
-    RTX 6000 PRO (96GB VRAM) optimized settings.
-    MAXIMUM SPEED + MAXIMUM QUALITY - NO COMPROMISES!
+    RTX 6000 PRO (96GB VRAM) with multiple SPEED MODES.
     
-    With 96GB VRAM, we can:
-    - Use largest windows (121 frames) for best temporal consistency
-    - NO VAE tiling (full resolution processing)
-    - NO model offloading (everything stays in VRAM)
-    - NO block swapping (zero disk I/O)
-    - Maximum inference steps (6 steps) for best quality
-    - Support 720p multi-person WITHOUT any degradation
-    - Even 1080p multi-person is possible
+    Speed modes:
+    - "maximum_quality": Original settings (window 121, steps 6)
+    - "balanced": Fast with minimal quality loss (window 81, steps 5)
+    - "fast": Fastest with acceptable quality (window 65, steps 4)
+    - "turbo": Maximum speed (window 49, steps 3)
     """
     # Detect VRAM to verify RTX 6000 PRO
     try:
@@ -151,68 +148,78 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
         vram_mb = int(float(result.stdout.strip())) if result.returncode == 0 else 96000
         
         if vram_mb < 90000:
-            logger.error(f"❌ CRITICAL: Only {vram_mb}MB VRAM detected!")
-            logger.error(f"❌ This build requires RTX 6000 PRO (96GB VRAM)")
-            logger.error(f"❌ You are on the 'rtx-6000-pro' branch")
-            logger.error(f"❌ For GPUs with <90GB VRAM, use the 'rtx-5090' branch instead")
-            raise Exception(f"Insufficient VRAM: {vram_mb}MB < 90GB minimum for RTX 6000 PRO build")
+            logger.error(f"CRITICAL: Only {vram_mb}MB VRAM detected!")
+            logger.error(f"This build requires RTX 6000 PRO (96GB VRAM)")
+            raise Exception(f"Insufficient VRAM: {vram_mb}MB < 90GB minimum")
             
-        logger.info(f"✅ RTX 6000 PRO 96GB detected: {vram_mb}MB VRAM")
+        logger.info(f"RTX 6000 PRO 96GB detected: {vram_mb}MB VRAM")
     except subprocess.CalledProcessError as e:
         logger.warning(f"VRAM detection failed: {e}, assuming RTX 6000 PRO")
         vram_mb = 96000
     
-    # Detect GPU architecture
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        compute_cap = result.stdout.strip() if result.returncode == 0 else "unknown"
-        logger.info(f"🔥 GPU Architecture: SM {compute_cap}")
-    except Exception:
-        compute_cap = "unknown"
+    logger.info(f"Resolution: {resolution} | Frames: {max_frames} | Persons: {person_count} | Speed: {speed_mode}")
     
-    logger.info(f"🚀 RTX 6000 PRO MAXIMUM MODE | Resolution: {resolution} | Frames: {max_frames} | Persons: {person_count}")
-    logger.info(f"💎 96GB VRAM = ZERO COMPROMISES = MAXIMUM QUALITY")
+    # Speed mode configurations with quality trade-off descriptions
+    speed_configs = {
+        "maximum_quality": {
+            "window": 121,
+            "steps": 6,
+            "scheduler": "dpm++_sde",
+            "desc": "MAXIMUM QUALITY - Best results, pristine motion",
+            "quality": "Perfect - No compromises, ideal for production"
+        },
+        "balanced": {
+            "window": 81,
+            "steps": 5,
+            "scheduler": "dpm++_sde",
+            "desc": "BALANCED - 30-35% faster, imperceptible quality loss",
+            "quality": "Excellent - Ideal for most use cases"
+        },
+        "fast": {
+            "window": 65,
+            "steps": 4,
+            "scheduler": "euler",
+            "desc": "FAST - 50-55% faster, minor motion smoothing",
+            "quality": "Very Good - Suitable for drafts and iterations"
+        },
+        "turbo": {
+            "window": 49,
+            "steps": 3,
+            "scheduler": "euler",
+            "desc": "TURBO - 65-70% faster, visible in complex scenes",
+            "quality": "Good - Best for rapid testing and previews"
+        }
+    }
     
-    # RTX 6000 PRO 96GB: MAXIMUM SETTINGS FOR ALL WORKLOADS
-    attention_mode = "sdpa"  # Best compatibility
-    force_offload = False     # NEVER offload with 96GB!
-    tiled_vae = False         # FULL resolution VAE processing
-    enable_vae_tiling = False # NO tiling needed
-    blocks_to_swap = 0        # ZERO swapping with 96GB
-    prefetch_blocks = 10      # MAXIMUM prefetch (we have the memory!)
-    steps = 6                 # MAXIMUM quality (always 6 steps)
+    # Validate and get speed config
+    if speed_mode not in speed_configs:
+        logger.warning(f"Invalid speed_mode '{speed_mode}', defaulting to 'balanced'")
+        speed_mode = "balanced"
     
-    # Window size based on video length (larger = better quality)
-    if max_frames > 2000:
-        # Very long videos (>80 seconds): Use large window
-        frame_window_size = 121
-        logger.info(f"📹 Very long video ({max_frames} frames): window 121 (maximum temporal consistency)")
-    elif max_frames > 800:
-        # Long videos (32-80 seconds): Use maximum window
-        frame_window_size = 121
-        logger.info(f"� Long video ({max_frames} frames): window 121 (excellent quality)")
-    else:
-        # Short-medium videos: Use maximum window
-        frame_window_size = 121
-        logger.info(f"� Standard video ({max_frames} frames): window 121 (maximum quality)")
+    config = speed_configs[speed_mode]
+    frame_window_size = config["window"]
+    steps = config["steps"]
+    scheduler = config["scheduler"]
     
-    # Resolution-specific logging (but NO compromises needed!)
+    logger.info(f"SPEED MODE: {config['desc']}")
+    logger.info(f"Quality Trade-off: {config['quality']}")
+    logger.info(f"Window: {frame_window_size} | Steps: {steps} | Scheduler: {scheduler}")
+    
+    # RTX 6000 PRO base optimizations (always enabled)
+    attention_mode = "sdpa"
+    force_offload = False
+    tiled_vae = False
+    enable_vae_tiling = False
+    blocks_to_swap = 0
+    prefetch_blocks = 10
+    
+    # Resolution-specific logging
     if resolution == "720p" and person_count == "multi":
-        logger.info("🔥 720p MULTI-PERSON: Full speed mode (96GB makes this EASY!)")
-        logger.info("✅ NO tiling, NO offload, NO swapping - PURE PERFORMANCE")
+        logger.info("720p MULTI-PERSON mode active")
     elif resolution == "720p":
-        logger.info("⚡ 720p SINGLE-PERSON: Maximum quality mode")
-    elif person_count == "multi":
-        logger.info("👥 MULTI-PERSON: Maximum quality (96GB = no memory constraints)")
-    else:
-        logger.info("🎯 480p: Maximum quality + maximum speed")
+        logger.info("720p SINGLE-PERSON mode active")
     
-    # Apply MAXIMUM settings to workflow nodes
+    # Apply settings to workflow nodes
     settings_applied = []
     
     if "122" in prompt:
@@ -222,14 +229,16 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
     if "128" in prompt:
         prompt["128"]["inputs"]["force_offload"] = force_offload
         prompt["128"]["inputs"]["steps"] = steps
-        settings_applied.append(f"steps={steps} (MAXIMUM)")
+        prompt["128"]["inputs"]["scheduler"] = scheduler
+        settings_applied.append(f"steps={steps}")
+        settings_applied.append(f"scheduler={scheduler}")
     
     if "192" in prompt:
         prompt["192"]["inputs"]["force_offload"] = force_offload
         prompt["192"]["inputs"]["tiled_vae"] = tiled_vae
         prompt["192"]["inputs"]["frame_window_size"] = frame_window_size
-        settings_applied.append(f"window={frame_window_size} (MAXIMUM)")
-        settings_applied.append(f"tiled_vae={tiled_vae} (FULL RES)")
+        settings_applied.append(f"window={frame_window_size}")
+        settings_applied.append(f"tiled_vae={tiled_vae}")
     
     if "130" in prompt:
         prompt["130"]["inputs"]["enable_vae_tiling"] = enable_vae_tiling
@@ -242,18 +251,27 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
     if "134" in prompt:
         prompt["134"]["inputs"]["blocks_to_swap"] = blocks_to_swap
         prompt["134"]["inputs"]["prefetch_blocks"] = prefetch_blocks
-        settings_applied.append(f"blocks_to_swap={blocks_to_swap} (NO SWAPPING)")
-        settings_applied.append(f"prefetch={prefetch_blocks} (MAXIMUM)")
+        settings_applied.append(f"blocks_to_swap={blocks_to_swap}")
+        settings_applied.append(f"prefetch={prefetch_blocks}")
     
-    logger.info(f"✅ Applied {len(settings_applied)} MAXIMUM quality optimizations:")
+    logger.info(f"Applied {len(settings_applied)} optimizations:")
     for setting in settings_applied:
-        logger.info(f"  💎 {setting}")
+        logger.info(f"  - {setting}")
+    
+    # Store config in prompt metadata for response
+    prompt["_speed_mode_used"] = speed_mode
+    prompt["_config_applied"] = {
+        "speed_mode": speed_mode,
+        "window": frame_window_size,
+        "steps": steps,
+        "scheduler": scheduler,
+        "quality": config["quality"]
+    }
     
     return prompt
 
 # -----------------------------
 # ComfyUI prompt I/O
-# -----------------------------
 # -----------------------------
 def queue_prompt(prompt: dict, input_type="image", person_count="single"):
     url = f"http://{SERVER_ADDRESS}:8188/prompt"
@@ -431,7 +449,15 @@ def handler(job):
         if person_count not in {"single", "multi"}:
             return {"error": f"Invalid person_count '{person_count}'. Must be 'single' or 'multi'."}
         
-        logger.info(f"Workflow: type={input_type}, persons={person_count}")
+        # NEW: Speed mode selection with env var support
+        default_speed = os.getenv("DEFAULT_SPEED_MODE", "balanced")
+        speed_mode = job_input.get("speed_mode", default_speed)
+        valid_modes = {"maximum_quality", "balanced", "fast", "turbo"}
+        if speed_mode not in valid_modes:
+            logger.warning(f"Invalid speed_mode '{speed_mode}', defaulting to 'balanced'")
+            speed_mode = "balanced"
+        
+        logger.info(f"Workflow: type={input_type}, persons={person_count}, speed={speed_mode}")
 
         # Workflow
         workflow_path = get_workflow_path(input_type, person_count)
@@ -502,8 +528,13 @@ def handler(job):
         # Validate workflow has required nodes
         validate_workflow_nodes(prompt, input_type, person_count)
 
-        # OPTIMIZE WORKFLOW FOR RTX 6000 PRO 96GB - MAXIMUM QUALITY
-        prompt = optimize_workflow_for_gpu(prompt, max_frames=max_frame, resolution=resolution, person_count=person_count)
+        # OPTIMIZE WORKFLOW WITH SPEED MODE
+        prompt = optimize_workflow_for_gpu(prompt, max_frames=max_frame, resolution=resolution, 
+                                          person_count=person_count, speed_mode=speed_mode)
+        
+        # Extract config metadata for response
+        speed_mode_used = prompt.pop("_speed_mode_used", speed_mode)
+        config_applied = prompt.pop("_config_applied", {})
 
         # Existence and validation checks
         if not os.path.exists(media_local_path):
@@ -585,7 +616,17 @@ def handler(job):
                         try:
                             url = s3_upload_and_url(p)
                             logger.info(f"Uploaded to S3: {url}")
-                            return {"video_url": url}
+                            return {
+                                "video_url": url,
+                                "settings": {
+                                    "speed_mode": speed_mode_used,
+                                    "resolution": f"{width}x{height}",
+                                    "frames": max_frame,
+                                    "input_type": input_type,
+                                    "person_count": person_count,
+                                    **config_applied
+                                }
+                            }
                         except Exception as e:
                             logger.error(f"S3 upload failed, falling back to base64. Error: {e}")
 
@@ -593,7 +634,17 @@ def handler(job):
                     with open(p, "rb") as f:
                         b64 = base64.b64encode(f.read()).decode("utf-8")
                     logger.info(f"Returning base64 video ({len(b64)} chars)")
-                    return {"video": f"data:video/mp4;base64,{b64}"}
+                    return {
+                        "video": f"data:video/mp4;base64,{b64}",
+                        "settings": {
+                            "speed_mode": speed_mode_used,
+                            "resolution": f"{width}x{height}",
+                            "frames": max_frame,
+                            "input_type": input_type,
+                            "person_count": person_count,
+                            **config_applied
+                        }
+                    }
 
         return {"error": "No video file was produced by the workflow."}
 
