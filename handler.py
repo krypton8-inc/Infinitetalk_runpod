@@ -145,7 +145,7 @@ def s3_upload_and_url(file_path: str) -> str:
 # -----------------------------
 def optimize_workflow_for_gpu(prompt: dict) -> dict:
     """
-    Dynamically adjust workflow settings based on detected VRAM.
+    Dynamically adjust workflow settings based on detected VRAM and GPU architecture.
     
     Settings adjusted:
     - force_offload: Controls model unloading between windows
@@ -153,6 +153,7 @@ def optimize_workflow_for_gpu(prompt: dict) -> dict:
     - enable_vae_tiling: VAE encode/decode tiling
     - blocks_to_swap: Memory management aggressiveness
     - prefetch_blocks: Prefetch optimization
+    - attention_mode: Attention mechanism (sageattn for Hopper, sdpa otherwise)
     
     VRAM tiers:
     - >= 32GB: Maximum speed + quality (no offloading, no tiling)
@@ -176,7 +177,30 @@ def optimize_workflow_for_gpu(prompt: dict) -> dict:
         logger.warning(f"VRAM detection error: {e}, using conservative settings")
         vram_mb = 24000
     
+    # Detect GPU compute capability for attention optimization
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            compute_cap = result.stdout.strip()
+        else:
+            compute_cap = "unknown"
+    except Exception:
+        compute_cap = "unknown"
+    
     logger.info(f"Detected VRAM: {vram_mb}MB - optimizing workflow settings")
+    
+    # Optimize attention mode for Hopper GPUs
+    if compute_cap.startswith("9."):  # Hopper (H100, H200)
+        attention_mode = "sageattn"
+        logger.info(f"Hopper GPU detected (SM {compute_cap}): using SageAttention for ~10-15% speedup")
+    else:
+        attention_mode = "sdpa"
+        logger.info(f"Non-Hopper GPU (SM {compute_cap}): using SDPA attention")
     
     # Determine optimal settings based on VRAM
     if vram_mb >= 32000:
@@ -208,6 +232,11 @@ def optimize_workflow_for_gpu(prompt: dict) -> dict:
     
     # Apply settings to workflow nodes
     settings_applied = []
+    
+    # Apply attention mode to WanVideoModelLoader
+    if "122" in prompt:
+        prompt["122"]["inputs"]["attention_mode"] = attention_mode
+        settings_applied.append(f"Node 122 (ModelLoader): attention_mode={attention_mode}")
     
     if "128" in prompt:  # WanVideoSampler
         prompt["128"]["inputs"]["force_offload"] = force_offload
