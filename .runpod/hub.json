@@ -1,6 +1,6 @@
 {
-  "title": "InfiniteTalk VideoGen",
-  "description": "InfiniteTalk unlimited-length talking video generation with MAXIMUM QUALITY for RTX 6000 PRO (96GB VRAM). Supports 720p multi-person, image-to-video, and video-to-video generation with zero compromises. Window size 121, 6 inference steps, full resolution VAE, zero swapping.",
+  "title": "InfiniteTalk VideoGen - Speed Optimized",
+  "description": "InfiniteTalk unlimited-length talking video generation optimized for RTX 6000 PRO (96GB VRAM). Features 4 flexible speed modes (35-70% faster) with quality-speed trade-offs. Supports 720p multi-person, I2V and V2V generation. No VAE tiling, no swapping, everything in VRAM.",
   "type": "serverless",
   "category": "video",
   "iconUrl": "https://krypton8.s3.us-east-1.amazonaws.com/logo_krypton8.jpg",
