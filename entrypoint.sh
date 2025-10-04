@@ -58,6 +58,28 @@ if [[ "${VRAM_MB}" -gt 0 && "${VRAM_MB}" -le 24500 ]]; then
   echo "Low/medium VRAM detected (<=24GB). Set PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF}"
 fi
 
+# Link models from network volume (if available)
+echo "=== Checking for network volume models ==="
+if [ -d "/runpod-volume/models" ]; then
+    echo "Network volume found at /runpod-volume/models"
+    echo "Linking models to ComfyUI..."
+    
+    # Link each model subdirectory
+    for model_type in diffusion_models loras vae text_encoders clip_vision; do
+        if [ -d "/runpod-volume/models/${model_type}" ]; then
+            echo "Linking ${model_type}..."
+            ln -sf /runpod-volume/models/${model_type}/* /ComfyUI/models/${model_type}/ 2>/dev/null || true
+        fi
+    done
+    
+    # Verify models are accessible
+    model_count=$(find /ComfyUI/models -type l -o -type f 2>/dev/null | wc -l)
+    echo "Models linked successfully (${model_count} files accessible)"
+else
+    echo "WARNING: Network volume not found at /runpod-volume/models"
+    echo "ComfyUI will start but models must be baked into the image or provided another way."
+fi
+
 # Start ComfyUI in the background
 echo "Starting ComfyUI in the background with flag: '${ATTN_FLAG}' ..."
 python /ComfyUI/main.py --listen ${ATTN_FLAG} &

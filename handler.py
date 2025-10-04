@@ -138,7 +138,104 @@ def s3_upload_and_url(file_path: str) -> str:
         return f"{public_base}/{key}"
     else:
         # Standard S3 URL
-        return f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
+        return f"https://s3.{region}.amazonaws.com/{bucket}/{key}"
+
+# -----------------------------
+# GPU Optimization
+# -----------------------------
+def optimize_workflow_for_gpu(prompt: dict) -> dict:
+    """
+    Dynamically adjust workflow settings based on detected VRAM.
+    
+    Settings adjusted:
+    - force_offload: Controls model unloading between windows
+    - tiled_vae: VAE tiling (affects quality)
+    - enable_vae_tiling: VAE encode/decode tiling
+    - blocks_to_swap: Memory management aggressiveness
+    - prefetch_blocks: Prefetch optimization
+    
+    VRAM tiers:
+    - >= 32GB: Maximum speed + quality (no offloading, no tiling)
+    - 24-31GB: Balanced (selective tiling, no main offload)
+    - < 24GB: Conservative (full memory management)
+    """
+    # Detect VRAM
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            vram_mb = int(float(result.stdout.strip()))
+        else:
+            logger.warning("Failed to detect VRAM, using conservative settings")
+            vram_mb = 24000  # Default to conservative
+    except Exception as e:
+        logger.warning(f"VRAM detection error: {e}, using conservative settings")
+        vram_mb = 24000
+    
+    logger.info(f"Detected VRAM: {vram_mb}MB - optimizing workflow settings")
+    
+    # Determine optimal settings based on VRAM
+    if vram_mb >= 32000:
+        # High VRAM (32GB+): Maximum speed and quality
+        logger.info("High VRAM mode: Disabling all offloading and tiling for max speed/quality")
+        force_offload = False
+        tiled_vae = False
+        enable_vae_tiling = False
+        blocks_to_swap = 10
+        prefetch_blocks = 1
+        
+    elif vram_mb >= 24000:
+        # Medium VRAM (24-31GB): Balanced approach
+        logger.info("Medium VRAM mode: Balanced settings with selective tiling")
+        force_offload = False  # Keep main model in VRAM
+        tiled_vae = True       # Enable VAE tiling for safety
+        enable_vae_tiling = True
+        blocks_to_swap = 15
+        prefetch_blocks = 2
+        
+    else:
+        # Low VRAM (<24GB): Conservative settings
+        logger.info("Low VRAM mode: Full memory management enabled")
+        force_offload = True
+        tiled_vae = True
+        enable_vae_tiling = True
+        blocks_to_swap = 20
+        prefetch_blocks = 2
+    
+    # Apply settings to workflow nodes
+    settings_applied = []
+    
+    if "128" in prompt:  # WanVideoSampler
+        prompt["128"]["inputs"]["force_offload"] = force_offload
+        settings_applied.append(f"Node 128 (Sampler): force_offload={force_offload}")
+    
+    if "192" in prompt:  # WanVideoImageToVideoMultiTalk (I2V node)
+        prompt["192"]["inputs"]["force_offload"] = force_offload
+        prompt["192"]["inputs"]["tiled_vae"] = tiled_vae
+        settings_applied.append(f"Node 192 (I2V): force_offload={force_offload}, tiled_vae={tiled_vae}")
+    
+    if "130" in prompt:  # WanVideoDecode
+        prompt["130"]["inputs"]["enable_vae_tiling"] = enable_vae_tiling
+        settings_applied.append(f"Node 130 (VAE Decode): enable_vae_tiling={enable_vae_tiling}")
+    
+    if "229" in prompt:  # WanVideoEncode (V2V only)
+        prompt["229"]["inputs"]["enable_vae_tiling"] = enable_vae_tiling
+        settings_applied.append(f"Node 229 (VAE Encode): enable_vae_tiling={enable_vae_tiling}")
+    
+    if "134" in prompt:  # WanVideoBlockSwap
+        prompt["134"]["inputs"]["blocks_to_swap"] = blocks_to_swap
+        prompt["134"]["inputs"]["prefetch_blocks"] = prefetch_blocks
+        settings_applied.append(f"Node 134 (BlockSwap): blocks_to_swap={blocks_to_swap}, prefetch={prefetch_blocks}")
+    
+    logger.info(f"Applied {len(settings_applied)} optimizations:")
+    for setting in settings_applied:
+        logger.info(f"  - {setting}")
+    
+    return prompt
 
 # -----------------------------
 # ComfyUI prompt I/O
@@ -401,6 +498,9 @@ def handler(job):
         
         # Validate workflow has required nodes
         validate_workflow_nodes(prompt, input_type, person_count)
+
+        # OPTIMIZE WORKFLOW FOR GPU (dynamically adjust settings based on VRAM)
+        prompt = optimize_workflow_for_gpu(prompt)
 
         # Existence and validation checks
         if not os.path.exists(media_local_path):
