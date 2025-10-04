@@ -26,9 +26,9 @@ export XFORMERS_FORCE_DISABLE_TRITON=1
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 echo "Set attention backend safety flags"
 
-# Enable SageAttention for Blackwell (5090)
-ATTN_FLAG="--use-sage-attention"
-echo "SageAttention enabled (Blackwell SM 12.0 optimization)"
+# Disable SageAttention - not supported on Blackwell yet
+ATTN_FLAG=""
+echo "Using PyTorch SDPA (SageAttention not yet supported on SM 12.0)"
 
 # Link models from network volume
 echo "=== Checking for network volume models ==="

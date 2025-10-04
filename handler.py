@@ -156,7 +156,7 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
     logger.info(f"🚀 RTX 5090 Optimization | Resolution: {resolution} | Frames: {max_frames}")
     
     # RTX 5090 base settings (32GB VRAM, Blackwell)
-    attention_mode = "sageattn"  # Blackwell-optimized attention
+    attention_mode = "sdpa"  # SageAttention not supported on Blackwell yet
     force_offload = False  # Keep everything in VRAM
     blocks_to_swap = 8  # Aggressive (minimal swapping)
     prefetch_blocks = 3  # Maximum prefetch
