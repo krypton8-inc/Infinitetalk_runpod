@@ -164,19 +164,12 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
     
     # Resolution and length-specific optimizations
     if resolution == "720p":
-        if max_frames <= 520:  # Short videos (~20 seconds)
-            # Optimal: No tiling, aggressive speed
-            tiled_vae = False
-            enable_vae_tiling = False
-            steps = 4
-            logger.info("📊 720p short: Maximum speed (no tiling, 4 steps)")
-        else:  # Long videos (>20s)
-            # Safety: Enable tiling, maintain speed
-            tiled_vae = True
-            enable_vae_tiling = True
-            steps = 4
-            blocks_to_swap = 10  # Slightly more conservative
-            logger.info("📊 720p long: Balanced (tiling enabled, 4 steps)")
+        # 720p ALWAYS needs tiling on 5090 for safety
+        tiled_vae = True
+        enable_vae_tiling = True
+        steps = 4
+        blocks_to_swap = 10  # Slightly more conservative
+        logger.info("📊 720p: Balanced (tiling enabled, 4 steps)")
     else:  # 480p
         # 480p is easy for 5090 - prioritize quality
         tiled_vae = False
