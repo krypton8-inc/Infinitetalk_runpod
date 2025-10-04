@@ -30,7 +30,7 @@
 
   "128": {
     "inputs": {
-      "steps": 4,
+      "steps": 6,
       "cfg": 1.0000000000000002,
       "shift": 11.000000000000002,
       "seed": 2,
@@ -98,12 +98,12 @@
 
   "134": {
     "inputs": {
-      "blocks_to_swap": 8,
+      "blocks_to_swap": 0,
       "offload_img_emb": false,
       "offload_txt_emb": false,
       "use_non_blocking": true,
       "vace_blocks_to_swap": 0,
-      "prefetch_blocks": 3,
+      "prefetch_blocks": 10,
       "block_swap_debug": false
     },
     "class_type": "WanVideoBlockSwap",
@@ -149,7 +149,7 @@
     "inputs": {
       "width": ["291", 1],
       "height": ["291", 2],
-      "frame_window_size": 81,
+      "frame_window_size": 121,
       "motion_frame": 9,
       "force_offload": false,
       "colormatch": "disabled",

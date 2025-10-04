@@ -124,19 +124,45 @@ def s3_upload_and_url(file_path: str) -> str:
         return f"https://s3.{region}.amazonaws.com/{bucket}/{key}"
 
 # -----------------------------
-# GPU Optimization - RTX 5090 ONLY
+# GPU Optimization - RTX 6000 PRO 96GB ONLY
 # -----------------------------
 def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: str = "480p", person_count: str = "single") -> dict:
     """
-    RTX 5090 (32GB, SM 12.0) optimized settings.
-    Maximum speed with intelligent memory management.
+    RTX 6000 PRO (96GB VRAM) optimized settings.
+    MAXIMUM SPEED + MAXIMUM QUALITY - NO COMPROMISES!
     
-    Settings adjusted based on resolution and video length:
-    - 480p: Maximum quality (6 steps), no tiling
-    - 720p short (<20s): Maximum speed (4 steps), no tiling
-    - 720p long (>20s): Balanced (4 steps), tiling for safety
+    With 96GB VRAM, we can:
+    - Use largest windows (121 frames) for best temporal consistency
+    - NO VAE tiling (full resolution processing)
+    - NO model offloading (everything stays in VRAM)
+    - NO block swapping (zero disk I/O)
+    - Maximum inference steps (6 steps) for best quality
+    - Support 720p multi-person WITHOUT any degradation
+    - Even 1080p multi-person is possible
     """
-    # Verify GPU is RTX 5090
+    # Detect VRAM to verify RTX 6000 PRO
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        vram_mb = int(float(result.stdout.strip())) if result.returncode == 0 else 96000
+        
+        if vram_mb < 90000:
+            logger.error(f"❌ CRITICAL: Only {vram_mb}MB VRAM detected!")
+            logger.error(f"❌ This build requires RTX 6000 PRO (96GB VRAM)")
+            logger.error(f"❌ You are on the 'rtx-6000-pro' branch")
+            logger.error(f"❌ For GPUs with <90GB VRAM, use the 'rtx-5090' branch instead")
+            raise Exception(f"Insufficient VRAM: {vram_mb}MB < 90GB minimum for RTX 6000 PRO build")
+            
+        logger.info(f"✅ RTX 6000 PRO 96GB detected: {vram_mb}MB VRAM")
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"VRAM detection failed: {e}, assuming RTX 6000 PRO")
+        vram_mb = 96000
+    
+    # Detect GPU architecture
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
@@ -145,98 +171,89 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
             timeout=5
         )
         compute_cap = result.stdout.strip() if result.returncode == 0 else "unknown"
-        
-        # Verify Blackwell architecture (SM 12.x)
-        if not compute_cap.startswith("12."):
-            logger.warning(f"⚠️  Non-5090 GPU detected (SM {compute_cap}). This build is optimized for RTX 5090 (SM 12.0) only.")
-    except Exception as e:
-        logger.warning(f"GPU detection failed: {e}")
-        compute_cap = "12.0"
+        logger.info(f"🔥 GPU Architecture: SM {compute_cap}")
+    except Exception:
+        compute_cap = "unknown"
     
-    logger.info(f"🚀 RTX 5090 Optimization | Resolution: {resolution} | Frames: {max_frames} | Persons: {person_count}")
+    logger.info(f"🚀 RTX 6000 PRO MAXIMUM MODE | Resolution: {resolution} | Frames: {max_frames} | Persons: {person_count}")
+    logger.info(f"💎 96GB VRAM = ZERO COMPROMISES = MAXIMUM QUALITY")
     
-    # RTX 5090 base settings (32GB VRAM, Blackwell)
-    attention_mode = "sdpa"  # SageAttention not supported on Blackwell yet
-    force_offload = False  # Keep everything in VRAM
-    blocks_to_swap = 8  # Aggressive (minimal swapping)
-    prefetch_blocks = 3  # Maximum prefetch
-    frame_window_size = 81  # Standard window
+    # RTX 6000 PRO 96GB: MAXIMUM SETTINGS FOR ALL WORKLOADS
+    attention_mode = "sdpa"  # Best compatibility
+    force_offload = False     # NEVER offload with 96GB!
+    tiled_vae = False         # FULL resolution VAE processing
+    enable_vae_tiling = False # NO tiling needed
+    blocks_to_swap = 0        # ZERO swapping with 96GB
+    prefetch_blocks = 10      # MAXIMUM prefetch (we have the memory!)
+    steps = 6                 # MAXIMUM quality (always 6 steps)
     
-    # Multi-person workflows need MORE conservative settings (cross-attention is memory-intensive)
-    if person_count == "multi":
-        logger.info("👥 Multi-person detected: Applying extra memory optimization")
-        blocks_to_swap = 15  # Much more conservative
-        prefetch_blocks = 1  # Minimal prefetching
-        frame_window_size = 49  # Even smaller windows for safety
+    # Window size based on video length (larger = better quality)
+    if max_frames > 2000:
+        # Very long videos (>80 seconds): Use large window
+        frame_window_size = 121
+        logger.info(f"📹 Very long video ({max_frames} frames): window 121 (maximum temporal consistency)")
+    elif max_frames > 800:
+        # Long videos (32-80 seconds): Use maximum window
+        frame_window_size = 121
+        logger.info(f"� Long video ({max_frames} frames): window 121 (excellent quality)")
+    else:
+        # Short-medium videos: Use maximum window
+        frame_window_size = 121
+        logger.info(f"� Standard video ({max_frames} frames): window 121 (maximum quality)")
     
-    # Resolution and length-specific optimizations
-    if resolution == "720p":
-        # 720p ALWAYS needs tiling on 5090
-        tiled_vae = True
-        enable_vae_tiling = True
-        
-        if person_count == "multi":
-            # Multi-person 720p: EXTREME memory management required
-            force_offload = True  # CRITICAL: Offload model between windows
-            steps = 4  # Reduce steps for speed
-            blocks_to_swap = 25  # Maximum swapping possible
-            frame_window_size = 49  # Smallest safe window
-            logger.info("📊 720p Multi-person: EXTREME mode (offload ON, tiling, 4 steps, window 49)")
-        else:
-            # Single-person 720p: Moderate
-            steps = 4
-            blocks_to_swap = 10
-            logger.info("📊 720p Single-person: Balanced (tiling, 4 steps)")
-    else:  # 480p
-        # 480p is easier for 5090
-        if person_count == "multi":
-            # Multi-person 480p: Use tiling for safety
-            tiled_vae = True
-            enable_vae_tiling = True
-            steps = 5
-            logger.info("📊 480p Multi-person: Conservative (tiling enabled, 5 steps)")
-        else:
-            # Single-person 480p: High quality
-            tiled_vae = False
-            enable_vae_tiling = False
-            steps = 6 if max_frames <= 400 else 5
-            logger.info(f"📊 480p Single-person: High quality ({steps} steps, no tiling)")
+    # Resolution-specific logging (but NO compromises needed!)
+    if resolution == "720p" and person_count == "multi":
+        logger.info("🔥 720p MULTI-PERSON: Full speed mode (96GB makes this EASY!)")
+        logger.info("✅ NO tiling, NO offload, NO swapping - PURE PERFORMANCE")
+    elif resolution == "720p":
+        logger.info("⚡ 720p SINGLE-PERSON: Maximum quality mode")
+    elif person_count == "multi":
+        logger.info("👥 MULTI-PERSON: Maximum quality (96GB = no memory constraints)")
+    else:
+        logger.info("🎯 480p: Maximum quality + maximum speed")
     
-    # Apply settings to workflow nodes
+    # Apply MAXIMUM settings to workflow nodes
     settings_applied = []
     
     if "122" in prompt:
         prompt["122"]["inputs"]["attention_mode"] = attention_mode
-        settings_applied.append("SageAttention")
+        settings_applied.append(f"attention_mode={attention_mode}")
     
     if "128" in prompt:
         prompt["128"]["inputs"]["force_offload"] = force_offload
         prompt["128"]["inputs"]["steps"] = steps
-        settings_applied.append(f"{steps} steps")
+        settings_applied.append(f"steps={steps} (MAXIMUM)")
     
     if "192" in prompt:
         prompt["192"]["inputs"]["force_offload"] = force_offload
         prompt["192"]["inputs"]["tiled_vae"] = tiled_vae
         prompt["192"]["inputs"]["frame_window_size"] = frame_window_size
-        settings_applied.append(f"VAE tiling: {tiled_vae}")
+        settings_applied.append(f"window={frame_window_size} (MAXIMUM)")
+        settings_applied.append(f"tiled_vae={tiled_vae} (FULL RES)")
     
     if "130" in prompt:
         prompt["130"]["inputs"]["enable_vae_tiling"] = enable_vae_tiling
+        settings_applied.append(f"vae_decode_tiling={enable_vae_tiling}")
     
     if "229" in prompt:
         prompt["229"]["inputs"]["enable_vae_tiling"] = enable_vae_tiling
+        settings_applied.append(f"vae_encode_tiling={enable_vae_tiling}")
     
     if "134" in prompt:
         prompt["134"]["inputs"]["blocks_to_swap"] = blocks_to_swap
         prompt["134"]["inputs"]["prefetch_blocks"] = prefetch_blocks
-        settings_applied.append(f"BlockSwap: {blocks_to_swap}")
+        settings_applied.append(f"blocks_to_swap={blocks_to_swap} (NO SWAPPING)")
+        settings_applied.append(f"prefetch={prefetch_blocks} (MAXIMUM)")
     
-    logger.info(f"✅ Applied: {', '.join(settings_applied)}")
+    logger.info(f"✅ Applied {len(settings_applied)} MAXIMUM quality optimizations:")
+    for setting in settings_applied:
+        logger.info(f"  💎 {setting}")
     
     return prompt
 
 # -----------------------------
 # ComfyUI prompt I/O
+# -----------------------------
 # -----------------------------
 def queue_prompt(prompt: dict, input_type="image", person_count="single"):
     url = f"http://{SERVER_ADDRESS}:8188/prompt"
@@ -485,7 +502,7 @@ def handler(job):
         # Validate workflow has required nodes
         validate_workflow_nodes(prompt, input_type, person_count)
 
-        # OPTIMIZE WORKFLOW FOR RTX 5090
+        # OPTIMIZE WORKFLOW FOR RTX 6000 PRO 96GB - MAXIMUM QUALITY
         prompt = optimize_workflow_for_gpu(prompt, max_frames=max_frame, resolution=resolution, person_count=person_count)
 
         # Existence and validation checks

@@ -1,6 +1,6 @@
 {
   "title": "InfiniteTalk VideoGen",
-  "description": "InfiniteTalk is an unlimited-length talking video generation model that supports both audio-driven video-to-video and image-to-video generation",
+  "description": "InfiniteTalk unlimited-length talking video generation with MAXIMUM QUALITY for RTX 6000 PRO (96GB VRAM). Supports 720p multi-person, image-to-video, and video-to-video generation with zero compromises. Window size 121, 6 inference steps, full resolution VAE, zero swapping.",
   "type": "serverless",
   "category": "video",
   "iconUrl": "https://krypton8.s3.us-east-1.amazonaws.com/logo_krypton8.jpg",
@@ -8,7 +8,12 @@
     "runsOn": "GPU",
     "containerDiskInGb": 280,
     "gpuCount": 1,
-    "gpuTypeId": "NVIDIA GeForce RTX 5090",
-    "allowedCudaVersions": ["12.9", "12.8"]
+    "gpuTypeId": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
+    ],
+    "minVramInGb": 90,
+    "allowedCudaVersions": ["12.9", "12.8", "12.4", "12.1"]
   }
 }

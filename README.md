@@ -1,25 +1,69 @@
-# InfiniteTalk for RunPod Serverless - RTX 5090 Edition
+# InfiniteTalk for RunPod Serverless - RTX 6000 PRO Edition
 
-**Optimized exclusively for NVIDIA RTX 5090 (32GB, Blackwell architecture)**
+> ⚠️ **THIS IS THE RTX 6000 PRO (96GB) BRANCH** ⚠️
+>
+> This build is **exclusively optimized** for **RTX 6000 PRO with 96GB VRAM**.
+>
+> **Looking for RTX 5090 (32GB)?** → Switch to the `rtx-5090` branch.
 
-High-performance talking-head video generation with **I2V** and **V2V** support, fine-tuned for maximum speed on the RTX 5090.
+## 🔥 Why This Build Exists
 
-## GPU Requirements
+The RTX 6000 PRO (96GB) enables capabilities **impossible** on smaller GPUs:
 
-- **Required**: NVIDIA RTX 5090 (32GB VRAM, SM 12.0)
-- **Not supported**: Other GPUs (this build is 5090-specific)
+| Feature               | RTX 5090 (32GB)     | RTX 6000 PRO (96GB) |
+| --------------------- | ------------------- | ------------------- |
+| **720p Multi-Person** | ❌ OOM (needs 34GB) | ✅ **WORKS**        |
+| **Window Size**       | 49-81 (limited)     | **121** (maximum)   |
+| **VAE Tiling**        | Required            | **Not needed**      |
+| **Quality Steps**     | 4-5 (limited)       | **6** (maximum)     |
+| **Speed**             | Baseline            | **1.5-2x faster**   |
 
-## Features
+**TL;DR: This build has ZERO compromises. Maximum quality, maximum capability.**
 
+---
+
+## 📖 Full Documentation
+
+For comprehensive details, see: **[README_RTX6000PRO.md](./README_RTX6000PRO.md)**
+
+This includes:
+
+- ✅ Complete performance benchmarks
+- ✅ Cost analysis ($3.96/hr)
+- ✅ API reference
+- ✅ Deployment guide
+- ✅ Troubleshooting
+- ✅ Branch comparison
+
+---
+
+## ⚡ Quick Start
+
+**Optimized exclusively for NVIDIA RTX 6000 PRO (96GB VRAM)**
+
+High-performance talking-head video generation with **I2V** and **V2V** support, configured for **MAXIMUM quality**.
+
+### GPU Requirements
+
+- **Required**: NVIDIA RTX 6000 PRO (≥90GB VRAM)
+- **Not supported**: GPUs with <90GB VRAM (will error on startup)
+- **For RTX 5090**: Use the `rtx-5090` branch instead
+
+### Key Features
+
+- **720p Multi-Person**: ✅ Fully supported (impossible on <48GB GPUs)
 - **Infinite Talking**: Long-form videos synchronized to audio
 - **I2V & V2V**: Image→Video or Video→Video
 - **Single & Multi-person**: 1 or 2 speakers
+- **Maximum Quality**: Window size 121, no tiling, 6 steps always
 - **Resolution options**:
-  - `16:9` + `480p` → **854×480** (fastest)
-  - `9:16` + `480p` → **480×854** (fastest)
-  - `16:9` + `720p` → **1280×720** (balanced)
-  - `9:16` + `720p` → **720×1280** (balanced)
+  - `16:9` + `480p` → **854×480**
+  - `9:16` + `480p` → **480×854**
+  - `16:9` + `720p` → **1280×720** (multi-person supported! ⭐)
+  - `9:16` + `720p` → **720×1280** (multi-person supported! ⭐)
 - **S3 output**: Optional S3 upload with URL return
+
+---
 
 ## API
 

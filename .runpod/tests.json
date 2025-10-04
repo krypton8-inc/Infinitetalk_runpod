@@ -5,18 +5,50 @@
       "input": {
         "input_type": "image",
         "person_count": "single",
-        "prompt": "A person is talking.",
+        "prompt": "A person is talking naturally.",
         "image_url": "https://krypton8.s3.us-east-1.amazonaws.com/test_image.png",
         "wav_url": "https://krypton8.s3.us-east-1.amazonaws.com/test_audio.wav",
         "aspect_ratio": "9:16",
         "resolution": "480p"
       },
       "timeout": 300000
+    },
+    {
+      "name": "i2v_single_720p_test",
+      "input": {
+        "input_type": "image",
+        "person_count": "single",
+        "prompt": "A person speaking with excellent quality.",
+        "image_url": "https://krypton8.s3.us-east-1.amazonaws.com/test_image.png",
+        "wav_url": "https://krypton8.s3.us-east-1.amazonaws.com/test_audio.wav",
+        "aspect_ratio": "16:9",
+        "resolution": "720p"
+      },
+      "timeout": 600000
+    },
+    {
+      "name": "i2v_multi_720p_test",
+      "input": {
+        "input_type": "image",
+        "person_count": "multi",
+        "prompt": "Two people having an energetic conversation.",
+        "image_url": "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_image.png",
+        "wav_url": "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_audio.wav",
+        "wav_url_2": "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_audio2.wav",
+        "aspect_ratio": "16:9",
+        "resolution": "720p"
+      },
+      "timeout": 900000
     }
   ],
   "config": {
-    "gpuTypeId": "NVIDIA GeForce RTX 5090",
+    "gpuTypeId": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
+    ],
     "gpuCount": 1,
-    "allowedCudaVersions": ["12.8", "12.9"]
+    "minVramInGb": 90,
+    "allowedCudaVersions": ["12.9", "12.8", "12.4", "12.1"]
   }
 }
