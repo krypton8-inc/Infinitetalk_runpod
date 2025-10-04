@@ -35,7 +35,19 @@ echo ""
 # RTX 6000 PRO optimizations
 export XFORMERS_FORCE_DISABLE_TRITON=1
 export PYTORCH_ENABLE_MPS_FALLBACK=1
-echo "Set attention backend safety flags"
+
+# Math/allocator speed-ups (help the sampler most)
+export NVIDIA_TF32_OVERRIDE=1
+export TORCH_ALLOW_TF32_CUBLAS=1
+export TORCH_ALLOW_TF32=1
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+
+# Optional: adjust infinitetalk overlap percentage (default 0.14)
+export INF_TALK_OVERLAP_PCT="${INF_TALK_OVERLAP_PCT:-0.14}"
+
+echo "Set attention, TF32, and allocator flags"
+echo "INF_TALK_OVERLAP_PCT=${INF_TALK_OVERLAP_PCT}"
+echo ""
 
 # Use PyTorch SDPA for maximum compatibility
 ATTN_FLAG=""
@@ -47,14 +59,14 @@ echo "=== Checking for network volume models ==="
 if [ -d "/runpod-volume/models" ]; then
     echo "Network volume found at /runpod-volume/models"
     echo "Linking models to ComfyUI..."
-    
+
     for model_type in diffusion_models loras vae text_encoders clip_vision; do
         if [ -d "/runpod-volume/models/${model_type}" ]; then
             echo "Linking ${model_type}..."
             ln -sf /runpod-volume/models/${model_type}/* /ComfyUI/models/${model_type}/ 2>/dev/null || true
         fi
     done
-    
+
     model_count=$(find /ComfyUI/models -type l -o -type f 2>/dev/null | wc -l)
     echo "Models linked: ${model_count} files accessible"
 else
@@ -67,10 +79,10 @@ echo "=========================================="
 echo "Starting ComfyUI with flexible speed modes"
 echo ""
 echo "Available Speed Modes (set via API):"
-echo "  • maximum_quality: Window 121, Steps 6 (baseline quality)"
-echo "  • balanced: Window 81, Steps 5 (35% faster) [DEFAULT]"
-echo "  • fast: Window 65, Steps 4 (55% faster)"
-echo "  • turbo: Window 49, Steps 3 (70% faster)"
+echo "  • maximum_quality: Window 121, Steps 6, Scheduler dpm++_sde (baseline quality)"
+echo "  • balanced:        Window 81,  Steps 5, Scheduler dpm++_sde (~35% faster) [DEFAULT]"
+echo "  • fast:            Window 121, Steps 4, Scheduler euler     (big window, fewer steps)"
+echo "  • turbo:           Window 96,  Steps 3, Scheduler euler     (big window, minimal steps)"
 echo ""
 echo "RTX 6000 PRO advantages (always active):"
 echo "  • VAE tiling: Disabled (full resolution)"
@@ -78,7 +90,9 @@ echo "  • Block swapping: 0 (everything in VRAM)"
 echo "  • Prefetch blocks: 10 (maximum)"
 echo "  • Model offloading: Never needed"
 echo "=========================================="
-python /ComfyUI/main.py --listen ${ATTN_FLAG} &
+
+# Log ComfyUI output to a file so tail on failure works
+python /ComfyUI/main.py --listen ${ATTN_FLAG} > /tmp/comfyui.log 2>&1 &
 COMFY_PID=$!
 echo "ComfyUI started (PID: ${COMFY_PID})"
 echo ""
@@ -90,15 +104,17 @@ elapsed=0
 until curl -s http://127.0.0.1:8188/ >/dev/null 2>&1; do
   if ! kill -0 ${COMFY_PID} 2>/dev/null; then
     echo "❌ Error: ComfyUI process died during startup"
+    echo "Last log lines:"
+    tail -50 /tmp/comfyui.log 2>/dev/null || echo "(no log available)"
     exit 1
   fi
-  
+
   if (( elapsed >= max_wait )); then
     echo "❌ Error: ComfyUI failed to start within ${max_wait}s"
     tail -50 /tmp/comfyui.log 2>/dev/null || echo "(no log available)"
     exit 1
   fi
-  
+
   printf "Waiting... (%ds/%ds) [Free VRAM: %s MB]\n" \
     "${elapsed}" "${max_wait}" \
     "$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo "unknown")"
@@ -113,6 +129,6 @@ echo ""
 # Start the handler
 echo "=========================================="
 echo "Starting handler with speed mode support"
-echo "Default: balanced (35% faster, <5% quality loss)"
+echo "Default: balanced (~35% faster, minimal quality loss)"
 echo "=========================================="
 exec python handler.py

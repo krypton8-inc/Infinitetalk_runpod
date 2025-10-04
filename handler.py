@@ -1,4 +1,5 @@
 import os
+import math
 import json
 import uuid
 import time
@@ -9,6 +10,7 @@ import urllib.error
 import subprocess
 import websocket
 import librosa
+import mimetypes
 from urllib.parse import urlparse
 
 import runpod
@@ -43,7 +45,7 @@ def download_file_from_url(url: str, output_path: str) -> str:
     """Download a file from URL -> output_path with wget (fast, handles redirects)."""
     try:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
+
         result = subprocess.run(
             ["wget", "-O", output_path, "--no-verbose", "--timeout=45", url],
             capture_output=True,
@@ -107,13 +109,15 @@ def s3_upload_and_url(file_path: str) -> str:
     key = f"{key_prefix.rstrip('/')}/{uuid.uuid4()}_{basename}"
 
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    
+
     c = s3_client()
-    extra_args = {"ContentType": "video/mp4"}
-    
+    guessed_mime, _ = mimetypes.guess_type(file_path)
+    content_type = guessed_mime or "video/mp4"
+    extra_args = {"ContentType": content_type}
+
     if file_size_mb > 10:
-        logger.info(f"Uploading {file_size_mb:.1f}MB to S3: {key}")
-    
+        logger.info(f"Uploading {file_size_mb:.1f}MB to S3: {key} (ContentType={content_type})")
+
     c.upload_file(file_path, bucket, key, ExtraArgs=extra_args)
 
     public_base = os.getenv("S3_PUBLIC_BASE_URL")
@@ -126,16 +130,17 @@ def s3_upload_and_url(file_path: str) -> str:
 # -----------------------------
 # GPU Optimization - SPEED MODES
 # -----------------------------
-def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: str = "480p", 
+def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: str = "480p",
                               person_count: str = "single", speed_mode: str = "balanced") -> dict:
     """
     RTX 6000 PRO (96GB VRAM) with multiple SPEED MODES.
-    
-    Speed modes:
-    - "maximum_quality": Original settings (window 121, steps 6)
-    - "balanced": Fast with minimal quality loss (window 81, steps 5)
-    - "fast": Fastest with acceptable quality (window 65, steps 4)
-    - "turbo": Maximum speed (window 49, steps 3)
+
+    Improvements vs base:
+      • Force Wan on GPU (no offload)
+      • Big-window presets for fast/turbo (fewer windows on long clips)
+      • Scaled overlap (motion_frame ≈ window * 0.14 by default)
+      • Optional torch.compile wiring (guarded)
+      • Clear 'window plan' logging
     """
     # Detect VRAM to verify RTX 6000 PRO
     try:
@@ -146,20 +151,21 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
             timeout=5
         )
         vram_mb = int(float(result.stdout.strip())) if result.returncode == 0 else 96000
-        
+
         if vram_mb < 90000:
             logger.error(f"CRITICAL: Only {vram_mb}MB VRAM detected!")
             logger.error(f"This build requires RTX 6000 PRO (96GB VRAM)")
             raise Exception(f"Insufficient VRAM: {vram_mb}MB < 90GB minimum")
-            
+
         logger.info(f"RTX 6000 PRO 96GB detected: {vram_mb}MB VRAM")
     except subprocess.CalledProcessError as e:
         logger.warning(f"VRAM detection failed: {e}, assuming RTX 6000 PRO")
         vram_mb = 96000
-    
+
     logger.info(f"Resolution: {resolution} | Frames: {max_frames} | Persons: {person_count} | Speed: {speed_mode}")
-    
+
     # Speed mode configurations with quality trade-off descriptions
+    # NOTE: fast/turbo use BIG windows to reduce number of sliding windows in infinitetalk
     speed_configs = {
         "maximum_quality": {
             "window": 121,
@@ -176,35 +182,46 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
             "quality": "Excellent - Ideal for most use cases"
         },
         "fast": {
-            "window": 65,
+            "window": 121,  # big window to reduce total windows
             "steps": 4,
             "scheduler": "euler",
-            "desc": "FAST - 50-55% faster, minor motion smoothing",
+            "desc": "FAST - large window + fewer steps",
             "quality": "Very Good - Suitable for drafts and iterations"
         },
         "turbo": {
-            "window": 49,
+            "window": 96,   # still large, but a bit smaller than max
             "steps": 3,
             "scheduler": "euler",
-            "desc": "TURBO - 65-70% faster, visible in complex scenes",
+            "desc": "TURBO - large window + minimal steps",
             "quality": "Good - Best for rapid testing and previews"
         }
     }
-    
+
     # Validate and get speed config
     if speed_mode not in speed_configs:
         logger.warning(f"Invalid speed_mode '{speed_mode}', defaulting to 'balanced'")
         speed_mode = "balanced"
-    
+
     config = speed_configs[speed_mode]
     frame_window_size = config["window"]
     steps = config["steps"]
     scheduler = config["scheduler"]
-    
+
+    # Heuristic for very long clips: ensure big windows on fast/turbo
+    if max_frames and max_frames > 900 and speed_mode in {"fast", "turbo"}:
+        if speed_mode == "fast":
+            frame_window_size = max(frame_window_size, 121)
+            steps = min(steps, 4)
+            scheduler = "euler"
+        else:  # turbo
+            frame_window_size = max(frame_window_size, 96)
+            steps = min(steps, 3)
+            scheduler = "euler"
+
     logger.info(f"SPEED MODE: {config['desc']}")
     logger.info(f"Quality Trade-off: {config['quality']}")
     logger.info(f"Window: {frame_window_size} | Steps: {steps} | Scheduler: {scheduler}")
-    
+
     # RTX 6000 PRO base optimizations (always enabled)
     attention_mode = "sdpa"
     force_offload = False
@@ -212,52 +229,104 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
     enable_vae_tiling = False
     blocks_to_swap = 0
     prefetch_blocks = 10
-    
+
     # Resolution-specific logging
     if resolution == "720p" and person_count == "multi":
         logger.info("720p MULTI-PERSON mode active")
     elif resolution == "720p":
         logger.info("720p SINGLE-PERSON mode active")
-    
+
     # Apply settings to workflow nodes
     settings_applied = []
-    
+
+    # WanVideoModelLoader
     if "122" in prompt:
         prompt["122"]["inputs"]["attention_mode"] = attention_mode
+        # Keep Wan on the main GPU (96GB; no offload)
+        try:
+            prompt["122"]["inputs"]["load_device"] = "main_device"
+            settings_applied.append("load_device=main_device")
+        except Exception:
+            pass
         settings_applied.append(f"attention_mode={attention_mode}")
-    
+
+    # Sampler
     if "128" in prompt:
         prompt["128"]["inputs"]["force_offload"] = force_offload
         prompt["128"]["inputs"]["steps"] = steps
         prompt["128"]["inputs"]["scheduler"] = scheduler
         settings_applied.append(f"steps={steps}")
         settings_applied.append(f"scheduler={scheduler}")
-    
+
+    # Long I2V node (window + scaled overlap)
+    motion_frame_used = None
     if "192" in prompt:
         prompt["192"]["inputs"]["force_offload"] = force_offload
         prompt["192"]["inputs"]["tiled_vae"] = tiled_vae
         prompt["192"]["inputs"]["frame_window_size"] = frame_window_size
+
+        # Scale overlap with window (default 14%)
+        try:
+            overlap_pct = float(os.getenv("INF_TALK_OVERLAP_PCT", "0.14"))
+        except Exception:
+            overlap_pct = 0.14
+        motion_frame_used = max(8, int(round(frame_window_size * overlap_pct)))
+        if "motion_frame" in prompt["192"]["inputs"]:
+            prompt["192"]["inputs"]["motion_frame"] = motion_frame_used
+            settings_applied.append(f"motion_frame={motion_frame_used}")
+
         settings_applied.append(f"window={frame_window_size}")
         settings_applied.append(f"tiled_vae={tiled_vae}")
-    
+
+    # VAE decode / encode tiling flags
     if "130" in prompt:
         prompt["130"]["inputs"]["enable_vae_tiling"] = enable_vae_tiling
         settings_applied.append(f"vae_decode_tiling={enable_vae_tiling}")
-    
+
     if "229" in prompt:
         prompt["229"]["inputs"]["enable_vae_tiling"] = enable_vae_tiling
         settings_applied.append(f"vae_encode_tiling={enable_vae_tiling}")
-    
+
+    # Block swap (keep everything in VRAM)
     if "134" in prompt:
         prompt["134"]["inputs"]["blocks_to_swap"] = blocks_to_swap
         prompt["134"]["inputs"]["prefetch_blocks"] = prefetch_blocks
         settings_applied.append(f"blocks_to_swap={blocks_to_swap}")
         settings_applied.append(f"prefetch={prefetch_blocks}")
-    
+
+    # Keep CLIP-ViT on GPU (minor startup win)
+    if "237" in prompt:
+        try:
+            prompt["237"]["inputs"]["force_offload"] = False
+            settings_applied.append("clip_force_offload=False")
+        except Exception:
+            pass
+
+    # Optional: wire torch.compile settings if the nodes expose the pin
+    if "177" in prompt:
+        for nid in ("122", "128"):
+            if nid in prompt:
+                try:
+                    if "compile_settings" in prompt[nid]["inputs"]:
+                        prompt[nid]["inputs"]["compile_settings"] = ["177", 0]
+                        settings_applied.append(f"{nid}.compile_settings=177")
+                except Exception:
+                    pass
+
     logger.info(f"Applied {len(settings_applied)} optimizations:")
     for setting in settings_applied:
         logger.info(f"  - {setting}")
-    
+
+    # Log a simple window estimate so users understand runtime
+    def _estimate_windows(frames, W, overlap):
+        if not frames or W <= 0:
+            return 0
+        stride = max(1, W - (overlap or 0))
+        return int(math.ceil(max(0, frames - W) / stride)) + 1
+
+    est_windows = _estimate_windows(max_frames, frame_window_size, motion_frame_used if motion_frame_used is not None else 9)
+    logger.info(f"Window plan → frames={max_frames}  W={frame_window_size}  overlap={motion_frame_used if motion_frame_used is not None else 'n/a'}  ⇒  ~{est_windows} windows")
+
     # Store config in prompt metadata for response
     prompt["_speed_mode_used"] = speed_mode
     prompt["_config_applied"] = {
@@ -265,9 +334,11 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
         "window": frame_window_size,
         "steps": steps,
         "scheduler": scheduler,
+        "motion_frame": motion_frame_used,
+        "estimated_windows": est_windows,
         "quality": config["quality"]
     }
-    
+
     return prompt
 
 # -----------------------------
@@ -316,10 +387,8 @@ def get_history(prompt_id: str) -> dict:
         return json.loads(response.read())
 
 def get_video_filepaths(ws, prompt, input_type="image", person_count="single"):
-    """Submit prompt, wait for completion, then read ComfyUI history."""
     prompt_id = queue_prompt(prompt, input_type, person_count)["prompt_id"]
     outputs = {}
-
     while True:
         out = ws.recv()
         if isinstance(out, str):
@@ -332,12 +401,13 @@ def get_video_filepaths(ws, prompt, input_type="image", person_count="single"):
     history = get_history(prompt_id)[prompt_id]
     for node_id, node_output in history.get("outputs", {}).items():
         paths = []
-        if "gifs" in node_output:
-            for vid in node_output["gifs"]:
-                if "fullpath" in vid and os.path.exists(vid["fullpath"]):
-                    paths.append(vid["fullpath"])
+        for key in ("gifs", "videos"):  # support both keys
+            if key in node_output:
+                for vid in node_output[key]:
+                    fp = vid.get("fullpath") or vid.get("path")
+                    if fp and os.path.exists(fp):
+                        paths.append(fp)
         outputs[node_id] = paths
-
     return outputs
 
 # -----------------------------
@@ -356,20 +426,20 @@ def get_workflow_path(input_type: str, person_count: str) -> str:
 def validate_workflow_nodes(prompt: dict, input_type: str, person_count: str) -> None:
     """Validate that required nodes exist in the workflow before execution."""
     required_nodes = ["125", "241", "245", "246", "270"]
-    
+
     if input_type == "image":
         required_nodes.append("284")
     else:
         required_nodes.append("228")
-    
+
     if person_count == "multi":
         if input_type == "image":
             required_nodes.append("307")
         else:
             required_nodes.append("313")
-    
+
     missing_nodes = [node for node in required_nodes if node not in prompt]
-    
+
     if missing_nodes:
         raise Exception(
             f"Workflow validation failed: missing required nodes {missing_nodes}. "
@@ -421,7 +491,7 @@ def pick_dimensions(aspect_ratio: str | None, resolution: str | None) -> tuple[i
         dims = (1280, 720) if res == "720p" else (854, 480)
     else:  # 9:16
         dims = (720, 1280) if res == "720p" else (480, 854)
-    
+
     return (*dims, res)
 
 # -----------------------------
@@ -443,12 +513,12 @@ def handler(job):
         # Input type & persons
         input_type = job_input.get("input_type", "image")
         person_count = job_input.get("person_count", "single")
-        
+
         if input_type not in {"image", "video"}:
             return {"error": f"Invalid input_type '{input_type}'. Must be 'image' or 'video'."}
         if person_count not in {"single", "multi"}:
             return {"error": f"Invalid person_count '{person_count}'. Must be 'single' or 'multi'."}
-        
+
         # NEW: Speed mode selection with env var support
         default_speed = os.getenv("DEFAULT_SPEED_MODE", "balanced")
         speed_mode = job_input.get("speed_mode", default_speed)
@@ -456,7 +526,7 @@ def handler(job):
         if speed_mode not in valid_modes:
             logger.warning(f"Invalid speed_mode '{speed_mode}', defaulting to 'balanced'")
             speed_mode = "balanced"
-        
+
         logger.info(f"Workflow: type={input_type}, persons={person_count}, speed={speed_mode}")
 
         # Workflow
@@ -524,14 +594,16 @@ def handler(job):
 
         # Load and fill workflow
         prompt = load_workflow(workflow_path)
-        
+
         # Validate workflow has required nodes
         validate_workflow_nodes(prompt, input_type, person_count)
 
         # OPTIMIZE WORKFLOW WITH SPEED MODE
-        prompt = optimize_workflow_for_gpu(prompt, max_frames=max_frame, resolution=resolution, 
-                                          person_count=person_count, speed_mode=speed_mode)
-        
+        prompt = optimize_workflow_for_gpu(
+            prompt, max_frames=max_frame, resolution=resolution,
+            person_count=person_count, speed_mode=speed_mode
+        )
+
         # Extract config metadata for response
         speed_mode_used = prompt.pop("_speed_mode_used", speed_mode)
         config_applied = prompt.pop("_config_applied", {})
@@ -541,12 +613,12 @@ def handler(job):
             return {"error": f"Media file not found: {media_local_path}"}
         if os.path.getsize(media_local_path) == 0:
             return {"error": f"Media file is empty: {media_local_path}"}
-            
+
         if not os.path.exists(wav_path_1):
             return {"error": f"Audio file not found: {wav_path_1}"}
         if os.path.getsize(wav_path_1) == 0:
             return {"error": f"Audio file is empty: {wav_path_1}"}
-            
+
         if person_count == "multi" and wav_path_2:
             if not os.path.exists(wav_path_2):
                 return {"error": f"Second audio file not found: {wav_path_2}"}
@@ -594,6 +666,7 @@ def handler(job):
 
         # WS connect (up to 5 min)
         ws = websocket.WebSocket()
+        ws.settimeout(600)
         for attempt in range(60):
             try:
                 ws.connect(ws_url)
@@ -630,12 +703,14 @@ def handler(job):
                         except Exception as e:
                             logger.error(f"S3 upload failed, falling back to base64. Error: {e}")
 
-                    # Fallback: base64 data URL
+                    # Fallback: base64 data URL with correct MIME
                     with open(p, "rb") as f:
                         b64 = base64.b64encode(f.read()).decode("utf-8")
-                    logger.info(f"Returning base64 video ({len(b64)} chars)")
+                    mime, _ = mimetypes.guess_type(p)
+                    prefix = f"data:{mime or 'application/octet-stream'};base64,"
+                    logger.info(f"Returning base64 video ({len(b64)} chars, mime={mime})")
                     return {
-                        "video": f"data:video/mp4;base64,{b64}",
+                        "video": f"{prefix}{b64}",
                         "settings": {
                             "speed_mode": speed_mode_used,
                             "resolution": f"{width}x{height}",
