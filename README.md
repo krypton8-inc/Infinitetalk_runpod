@@ -45,7 +45,12 @@ All media inputs must be **URLs**.
 - If S3 env vars are set: `{ "video_url": "https://bucket/path/file.mp4" }`
 - Else: `{ "video": "data:video/mp4;base64,..." }`
 
----
+## Deploy on RunPod Serverless
+
+1. Create a Serverless Endpoint from this repo.
+2. **Select RTX 5090 as your GPU** (required for this build).
+3. (Optional) Set S3 env vars for URL outputs.
+4. Send POST requests with the **Input** format above.
 
 ## Examples
 
