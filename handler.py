@@ -166,8 +166,8 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
     if person_count == "multi":
         logger.info("👥 Multi-person detected: Applying extra memory optimization")
         blocks_to_swap = 15  # Much more conservative
-        prefetch_blocks = 2  # Reduce prefetching
-        frame_window_size = 65  # Smaller windows
+        prefetch_blocks = 1  # Minimal prefetching
+        frame_window_size = 49  # Even smaller windows for safety
     
     # Resolution and length-specific optimizations
     if resolution == "720p":
@@ -176,11 +176,12 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
         enable_vae_tiling = True
         
         if person_count == "multi":
-            # Multi-person 720p: MOST conservative settings
+            # Multi-person 720p: EXTREME memory management required
+            force_offload = True  # CRITICAL: Offload model between windows
             steps = 4  # Reduce steps for speed
-            blocks_to_swap = 20  # Maximum swapping
-            frame_window_size = 65  # Force small window
-            logger.info("📊 720p Multi-person: Ultra-conservative (tiling, 4 steps, window 65)")
+            blocks_to_swap = 25  # Maximum swapping possible
+            frame_window_size = 49  # Smallest safe window
+            logger.info("📊 720p Multi-person: EXTREME mode (offload ON, tiling, 4 steps, window 49)")
         else:
             # Single-person 720p: Moderate
             steps = 4
