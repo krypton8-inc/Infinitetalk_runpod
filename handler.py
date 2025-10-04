@@ -126,7 +126,7 @@ def s3_upload_and_url(file_path: str) -> str:
 # -----------------------------
 # GPU Optimization - RTX 5090 ONLY
 # -----------------------------
-def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: str = "480p") -> dict:
+def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: str = "480p", person_count: str = "single") -> dict:
     """
     RTX 5090 (32GB, SM 12.0) optimized settings.
     Maximum speed with intelligent memory management.
@@ -153,7 +153,7 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
         logger.warning(f"GPU detection failed: {e}")
         compute_cap = "12.0"
     
-    logger.info(f"🚀 RTX 5090 Optimization | Resolution: {resolution} | Frames: {max_frames}")
+    logger.info(f"🚀 RTX 5090 Optimization | Resolution: {resolution} | Frames: {max_frames} | Persons: {person_count}")
     
     # RTX 5090 base settings (32GB VRAM, Blackwell)
     attention_mode = "sdpa"  # SageAttention not supported on Blackwell yet
@@ -162,20 +162,44 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: st
     prefetch_blocks = 3  # Maximum prefetch
     frame_window_size = 81  # Standard window
     
+    # Multi-person workflows need MORE conservative settings (cross-attention is memory-intensive)
+    if person_count == "multi":
+        logger.info("👥 Multi-person detected: Applying extra memory optimization")
+        blocks_to_swap = 15  # Much more conservative
+        prefetch_blocks = 2  # Reduce prefetching
+        frame_window_size = 65  # Smaller windows
+    
     # Resolution and length-specific optimizations
     if resolution == "720p":
-        # 720p ALWAYS needs tiling on 5090 for safety
+        # 720p ALWAYS needs tiling on 5090
         tiled_vae = True
         enable_vae_tiling = True
-        steps = 4
-        blocks_to_swap = 10  # Slightly more conservative
-        logger.info("📊 720p: Balanced (tiling enabled, 4 steps)")
+        
+        if person_count == "multi":
+            # Multi-person 720p: MOST conservative settings
+            steps = 4  # Reduce steps for speed
+            blocks_to_swap = 20  # Maximum swapping
+            frame_window_size = 65  # Force small window
+            logger.info("📊 720p Multi-person: Ultra-conservative (tiling, 4 steps, window 65)")
+        else:
+            # Single-person 720p: Moderate
+            steps = 4
+            blocks_to_swap = 10
+            logger.info("📊 720p Single-person: Balanced (tiling, 4 steps)")
     else:  # 480p
-        # 480p is easy for 5090 - prioritize quality
-        tiled_vae = False
-        enable_vae_tiling = False
-        steps = 6 if max_frames <= 400 else 5
-        logger.info(f"📊 480p: High quality ({steps} steps, no tiling)")
+        # 480p is easier for 5090
+        if person_count == "multi":
+            # Multi-person 480p: Use tiling for safety
+            tiled_vae = True
+            enable_vae_tiling = True
+            steps = 5
+            logger.info("📊 480p Multi-person: Conservative (tiling enabled, 5 steps)")
+        else:
+            # Single-person 480p: High quality
+            tiled_vae = False
+            enable_vae_tiling = False
+            steps = 6 if max_frames <= 400 else 5
+            logger.info(f"📊 480p Single-person: High quality ({steps} steps, no tiling)")
     
     # Apply settings to workflow nodes
     settings_applied = []
@@ -461,7 +485,7 @@ def handler(job):
         validate_workflow_nodes(prompt, input_type, person_count)
 
         # OPTIMIZE WORKFLOW FOR RTX 5090
-        prompt = optimize_workflow_for_gpu(prompt, max_frames=max_frame, resolution=resolution)
+        prompt = optimize_workflow_for_gpu(prompt, max_frames=max_frame, resolution=resolution, person_count=person_count)
 
         # Existence and validation checks
         if not os.path.exists(media_local_path):
