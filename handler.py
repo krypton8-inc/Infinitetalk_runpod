@@ -143,9 +143,9 @@ def s3_upload_and_url(file_path: str) -> str:
 # -----------------------------
 # GPU Optimization
 # -----------------------------
-def optimize_workflow_for_gpu(prompt: dict) -> dict:
+def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81) -> dict:
     """
-    Dynamically adjust workflow settings based on detected VRAM and GPU architecture.
+    Dynamically adjust workflow settings based on detected VRAM, GPU architecture, and video length.
     
     Settings adjusted:
     - force_offload: Controls model unloading between windows
@@ -154,11 +154,14 @@ def optimize_workflow_for_gpu(prompt: dict) -> dict:
     - blocks_to_swap: Memory management aggressiveness
     - prefetch_blocks: Prefetch optimization
     - attention_mode: Attention mechanism (sageattn for Hopper, sdpa otherwise)
+    - frame_window_size: Processing window size (larger = slower but better temporal consistency)
+    - steps: Inference steps (can be reduced for speed)
     
     VRAM tiers:
-    - >= 32GB: Maximum speed + quality (no offloading, no tiling)
-    - 24-31GB: Balanced (selective tiling, no main offload)
-    - < 24GB: Conservative (full memory management)
+    - >= 40GB: Maximum speed + quality (large windows, no offloading, no tiling)
+    - 32-39GB: High performance (medium windows, no main offload)
+    - 24-31GB: Balanced (smaller windows, selective tiling, no main offload)
+    - < 24GB: Conservative (smallest windows, full memory management)
     """
     # Detect VRAM
     try:
@@ -194,41 +197,84 @@ def optimize_workflow_for_gpu(prompt: dict) -> dict:
     
     logger.info(f"Detected VRAM: {vram_mb}MB - optimizing workflow settings")
     
-    # Optimize attention mode for Hopper GPUs
-    if compute_cap.startswith("9."):  # Hopper (H100, H200)
+    # Optimize attention mode for advanced GPU architectures
+    if compute_cap.startswith("10."):  # Blackwell (RTX 5090, B100, B200)
+        attention_mode = "sageattn"
+        logger.info(f"Blackwell GPU detected (SM {compute_cap}): using SageAttention for optimal performance")
+    elif compute_cap.startswith("9."):  # Hopper (H100, H200)
         attention_mode = "sageattn"
         logger.info(f"Hopper GPU detected (SM {compute_cap}): using SageAttention for ~10-15% speedup")
     else:
         attention_mode = "sdpa"
-        logger.info(f"Non-Hopper GPU (SM {compute_cap}): using SDPA attention")
+        logger.info(f"GPU (SM {compute_cap}): using SDPA attention")
     
     # Determine optimal settings based on VRAM
-    if vram_mb >= 32000:
-        # High VRAM (32GB+): Maximum speed and quality
-        logger.info("High VRAM mode: Disabling all offloading and tiling for max speed/quality")
+    if vram_mb >= 40000:
+        # Very High VRAM (40GB+): Maximum speed and quality, large windows
+        logger.info("Very High VRAM mode: Large windows, no offloading, no tiling")
         force_offload = False
         tiled_vae = False
         enable_vae_tiling = False
-        blocks_to_swap = 10
-        prefetch_blocks = 1
+        blocks_to_swap = 8
+        prefetch_blocks = 3
+        frame_window_size = 121  # Larger window for better consistency but slower
+        
+    elif vram_mb >= 30000:
+        # High VRAM (30-39GB): Optimized for RTX 5090, 4090, A6000
+        logger.info("High VRAM mode (30-39GB): Optimized for RTX 5090/4090 - no offloading, no tiling, aggressive prefetch")
+        force_offload = False
+        tiled_vae = False
+        enable_vae_tiling = False
+        blocks_to_swap = 8   # Aggressive block management
+        prefetch_blocks = 3  # Maximum prefetching for speed
+        frame_window_size = 97  # Balanced window size
         
     elif vram_mb >= 24000:
-        # Medium VRAM (24-31GB): Balanced approach
-        logger.info("Medium VRAM mode: Balanced settings with selective tiling")
+        # Medium VRAM (24-29GB): Balanced with smaller windows for speed
+        logger.info("Medium VRAM mode: Smaller windows, selective tiling for speed")
         force_offload = False  # Keep main model in VRAM
         tiled_vae = True       # Enable VAE tiling for safety
         enable_vae_tiling = True
         blocks_to_swap = 15
         prefetch_blocks = 2
+        frame_window_size = 81  # Standard window
         
     else:
-        # Low VRAM (<24GB): Conservative settings
-        logger.info("Low VRAM mode: Full memory management enabled")
+        # Low VRAM (<24GB): Conservative with smallest windows
+        logger.info("Low VRAM mode: Smallest windows, full memory management")
         force_offload = True
         tiled_vae = True
         enable_vae_tiling = True
         blocks_to_swap = 20
         prefetch_blocks = 2
+        frame_window_size = 65  # Smaller window for memory savings
+    
+    # For very long videos, use optimized window sizes based on VRAM
+    # RTX 5090 with 32GB can handle larger windows even for long videos
+    if max_frames > 1000:
+        # Very long videos (>40 seconds)
+        logger.info(f"Very long video detected ({max_frames} frames), optimizing window size")
+        if vram_mb >= 30000:
+            frame_window_size = 81  # RTX 5090 can handle 81 even for very long videos
+        else:
+            frame_window_size = 65  # More conservative for lower VRAM
+    elif max_frames > 400:
+        # Long videos (16-40 seconds)
+        logger.info(f"Long video detected ({max_frames} frames), using optimized window size")
+        if vram_mb >= 30000:
+            frame_window_size = min(frame_window_size, 97)  # RTX 5090 can use 97
+        else:
+            frame_window_size = min(frame_window_size, 81)  # Cap at 81 for others
+    
+    # Optimize inference steps for very long videos to maintain reasonable generation times
+    # RTX 5090's high performance allows us to use slightly lower steps without major quality loss
+    steps = 6  # Default quality
+    if max_frames > 1500:  # Videos >60 seconds
+        steps = 5
+        logger.info(f"Extra long video ({max_frames} frames): reducing steps to {steps} for speed")
+    elif max_frames > 1000:  # Videos >40 seconds
+        steps = 5
+        logger.info(f"Very long video ({max_frames} frames): reducing steps to {steps} for speed")
     
     # Apply settings to workflow nodes
     settings_applied = []
@@ -240,12 +286,14 @@ def optimize_workflow_for_gpu(prompt: dict) -> dict:
     
     if "128" in prompt:  # WanVideoSampler
         prompt["128"]["inputs"]["force_offload"] = force_offload
-        settings_applied.append(f"Node 128 (Sampler): force_offload={force_offload}")
+        prompt["128"]["inputs"]["steps"] = steps
+        settings_applied.append(f"Node 128 (Sampler): force_offload={force_offload}, steps={steps}")
     
     if "192" in prompt:  # WanVideoImageToVideoMultiTalk (I2V node)
         prompt["192"]["inputs"]["force_offload"] = force_offload
         prompt["192"]["inputs"]["tiled_vae"] = tiled_vae
-        settings_applied.append(f"Node 192 (I2V): force_offload={force_offload}, tiled_vae={tiled_vae}")
+        prompt["192"]["inputs"]["frame_window_size"] = frame_window_size
+        settings_applied.append(f"Node 192 (I2V): force_offload={force_offload}, tiled_vae={tiled_vae}, frame_window_size={frame_window_size}")
     
     if "130" in prompt:  # WanVideoDecode
         prompt["130"]["inputs"]["enable_vae_tiling"] = enable_vae_tiling
@@ -528,8 +576,8 @@ def handler(job):
         # Validate workflow has required nodes
         validate_workflow_nodes(prompt, input_type, person_count)
 
-        # OPTIMIZE WORKFLOW FOR GPU (dynamically adjust settings based on VRAM)
-        prompt = optimize_workflow_for_gpu(prompt)
+        # OPTIMIZE WORKFLOW FOR GPU (dynamically adjust settings based on VRAM and video length)
+        prompt = optimize_workflow_for_gpu(prompt, max_frames=max_frame)
 
         # Existence and validation checks
         if not os.path.exists(media_local_path):
