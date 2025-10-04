@@ -13,7 +13,7 @@
       "base_precision": "fp16_fast",
       "quantization": "disabled",
       "load_device": "offload_device",
-      "attention_mode": "sdpa",
+      "attention_mode": "sageattn",
       "block_swap_args": ["134", 0],
       "lora": ["138", 0],
       "multitalk_model": ["120", 0]
@@ -37,7 +37,7 @@
       "cfg": 1.0000000000000002,
       "shift": 11.000000000000002,
       "seed": 2,
-      "force_offload": true,
+      "force_offload": false,
       "scheduler": "dpm++_sde",
       "riflex_freq_index": 0,
       "denoise_strength": 1,
@@ -67,7 +67,7 @@
 
   "130": {
     "inputs": {
-      "enable_vae_tiling": true,
+      "enable_vae_tiling": false,
       "tile_x": 272,
       "tile_y": 272,
       "tile_stride_x": 144,
@@ -101,12 +101,12 @@
 
   "134": {
     "inputs": {
-      "blocks_to_swap": 20,
+      "blocks_to_swap": 8,
       "offload_img_emb": false,
       "offload_txt_emb": false,
       "use_non_blocking": true,
       "vace_blocks_to_swap": 0,
-      "prefetch_blocks": 2,
+      "prefetch_blocks": 3,
       "block_swap_debug": false
     },
     "class_type": "WanVideoBlockSwap",
@@ -154,9 +154,9 @@
       "height": ["291", 2],
       "frame_window_size": 81,
       "motion_frame": 9,
-      "force_offload": true,
+      "force_offload": false,
       "colormatch": "disabled",
-      "tiled_vae": true,
+      "tiled_vae": false,
       "mode": "infinitetalk",
       "vae": ["129", 0],
       "start_image": ["291", 0],
@@ -198,7 +198,7 @@
 
   "229": {
     "inputs": {
-      "enable_vae_tiling": true,
+      "enable_vae_tiling": false,
       "tile_x": 272,
       "tile_y": 272,
       "tile_stride_x": 144,

@@ -1,52 +1,25 @@
-# InfiniteTalk for RunPod Serverless
+# InfiniteTalk for RunPod Serverless - RTX 5090 Edition
 
-This project is a template to deploy and run **InfiniteTalk** on **RunPod Serverless** with **ComfyUI**. It supports both **Image→Video (I2V)** and **Video→Video (V2V)** talking-head generation, including **single** and **multi-person** modes.
+**Optimized exclusively for NVIDIA RTX 5090 (32GB, Blackwell architecture)**
 
-> **What’s new**
->
-> - 480p **and** 720p output (auto-size from `aspect_ratio` + `resolution`).
-> - URL-only inputs (no base64 and no local path inputs).
-> - S3 upload support for results (optional).
-> - Wider GPU support & auto fallbacks to avoid kernel-mismatch and OOM on smaller GPUs.
+High-performance talking-head video generation with **I2V** and **V2V** support, fine-tuned for maximum speed on the RTX 5090.
 
----
+## GPU Requirements
+
+- **Required**: NVIDIA RTX 5090 (32GB VRAM, SM 12.0)
+- **Not supported**: Other GPUs (this build is 5090-specific)
 
 ## Features
 
-- **Infinite Talking**: generates long-form videos synchronized to audio.
-- **I2V & V2V**: feed a single portrait or an input video.
-- **Single & Multi-person**: one or two speakers.
-- **Auto sizing**: choose `aspect_ratio` (`"9:16"` or `"16:9"`) and `resolution` (`"480p"` or `"720p"`). The worker maps to:
-  - `16:9` + `480p` → **854×480**
-  - `9:16` + `480p` → **480×854**
-  - `16:9` + `720p` → **1280×720**
-  - `9:16` + `720p` → **720×1280**
-- **GPU aware**: uses attention and precision fallbacks to run on GPUs from 24 GB up to 180 GB VRAM.
-- **S3 output**: set `S3_REGION`, `S3_BUCKET`, `S3_KEY`, `S3_SECRET` to upload the result and return an S3 URL instead of base64.
-
-> **Note**: Inputs are **URL-only** for images/videos and audio. **Base64 and local paths are not supported.**
-
----
-
-## Supported GPUs
-
-You can target any of these classes on RunPod (or let RunPod choose). The worker adjusts kernels/attention paths automatically and will fall back safely when needed.
-
-|  VRAM | GPU Class             | Notes                         | Typical Price\*  |
-| ----: | --------------------- | ----------------------------- | ---------------- |
-| 180GB | B200                  | Max throughput for big models | \$4.46–\$5.58/hr |
-| 141GB | H200                  | Extreme throughput            | \$3.35–\$4.18/hr |
-|  80GB | H100 PRO              | Extreme throughput            | \$2.17–\$2.72/hr |
-|  80GB | A100                  | Great perf/value              | \$1.33–\$1.90/hr |
-|  48GB | L40/L40S/6000 Ada PRO | Very fast inference           | \$0.85–\$1.22/hr |
-|  48GB | A6000/A40             | Cost‑effective big models     | \$1.11–\$1.58/hr |
-|  32GB | 5090 PRO              | Fast for small/medium         | \$0.77–\$1.10/hr |
-|  24GB | 4090 PRO              | Fast for small/medium         | \$0.48–\$0.69/hr |
-|  24GB | L4/A5000/3090         | Good for medium               | \$0.40–\$0.58/hr |
-
-\*Prices are indicative, subject to change by provider.
-
----
+- **Infinite Talking**: Long-form videos synchronized to audio
+- **I2V & V2V**: Image→Video or Video→Video
+- **Single & Multi-person**: 1 or 2 speakers
+- **Resolution options**:
+  - `16:9` + `480p` → **854×480** (fastest)
+  - `9:16` + `480p` → **480×854** (fastest)
+  - `16:9` + `720p` → **1280×720** (balanced)
+  - `9:16` + `720p` → **720×1280** (balanced)
+- **S3 output**: Optional S3 upload with URL return
 
 ## API
 

@@ -8,6 +8,7 @@
     "runsOn": "GPU",
     "containerDiskInGb": 280,
     "gpuCount": 1,
+    "gpuTypeId": "NVIDIA GeForce RTX 5090",
     "allowedCudaVersions": ["12.9", "12.8"]
   }
 }

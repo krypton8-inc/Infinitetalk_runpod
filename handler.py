@@ -28,7 +28,6 @@ SERVER_ADDRESS = os.getenv("SERVER_ADDRESS", "127.0.0.1")
 CLIENT_ID = str(uuid.uuid4())
 
 # Default sample assets - these are test assets hosted in a public S3 bucket
-# If your bucket becomes private, update these URLs or remove defaults entirely
 DEFAULT_IMAGE_URL = "https://krypton8.s3.us-east-1.amazonaws.com/test_image.png"
 DEFAULT_AUDIO_URL = "https://krypton8.s3.us-east-1.amazonaws.com/test_audio.wav"
 
@@ -43,7 +42,6 @@ DEFAULT_MULTI_AUDIO_URL_2 = "https://krypton8.s3.us-east-1.amazonaws.com/multi_t
 def download_file_from_url(url: str, output_path: str) -> str:
     """Download a file from URL -> output_path with wget (fast, handles redirects)."""
     try:
-        # Ensure directory exists
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
         result = subprocess.run(
@@ -66,25 +64,16 @@ def download_file_from_url(url: str, output_path: str) -> str:
         raise Exception(f"Download error: {e}")
 
 def _out_with_ext(url: str, base_without_ext: str, default_ext: str = ".wav") -> str:
-    """
-    Build an output path preserving the extension from the URL path.
-    Falls back to default_ext if no extension is present.
-    Returns ABSOLUTE path.
-    """
+    """Build an output path preserving the extension from the URL path."""
     ext = os.path.splitext(urlparse(url).path)[1] or default_ext
     return os.path.abspath(base_without_ext + ext)
 
 def ensure_url_only(field_name: str, job_input: dict) -> str | None:
-    """
-    Enforce URL-only inputs (image_url, video_url, wav_url, wav_url_2).
-    Returns the URL string if present, else None.
-    Ignores/blocks *_path and *_base64 to avoid unsupported input types.
-    """
+    """Enforce URL-only inputs (image_url, video_url, wav_url, wav_url_2)."""
     url = job_input.get(field_name)
     if url:
         return url
 
-    # If the user sent *_path or *_base64, explicitly reject to be clear
     path_key = field_name.replace("_url", "_path")
     b64_key = field_name.replace("_url", "_base64")
     if job_input.get(path_key) or job_input.get(b64_key):
@@ -110,11 +99,7 @@ def s3_client():
     )
 
 def s3_upload_and_url(file_path: str) -> str:
-    """
-    Upload file to S3 and return the public URL.
-    If S3_PUBLIC_BASE_URL is set, use that as prefix (e.g., CloudFront).
-    Otherwise return the standard s3 URL.
-    """
+    """Upload file to S3 and return the public URL."""
     bucket = os.getenv("S3_BUCKET")
     region = os.getenv("S3_REGION")
     key_prefix = os.getenv("S3_PREFIX", "infinitetalk")
@@ -126,7 +111,6 @@ def s3_upload_and_url(file_path: str) -> str:
     c = s3_client()
     extra_args = {"ContentType": "video/mp4"}
     
-    # Log progress for large files
     if file_size_mb > 10:
         logger.info(f"Uploading {file_size_mb:.1f}MB to S3: {key}")
     
@@ -137,50 +121,22 @@ def s3_upload_and_url(file_path: str) -> str:
         public_base = public_base.rstrip("/")
         return f"{public_base}/{key}"
     else:
-        # Standard S3 URL
         return f"https://s3.{region}.amazonaws.com/{bucket}/{key}"
 
 # -----------------------------
-# GPU Optimization
+# GPU Optimization - RTX 5090 ONLY
 # -----------------------------
-def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81) -> dict:
+def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81, resolution: str = "480p") -> dict:
     """
-    Dynamically adjust workflow settings based on detected VRAM, GPU architecture, and video length.
+    RTX 5090 (32GB, SM 12.0) optimized settings.
+    Maximum speed with intelligent memory management.
     
-    Settings adjusted:
-    - force_offload: Controls model unloading between windows
-    - tiled_vae: VAE tiling (affects quality)
-    - enable_vae_tiling: VAE encode/decode tiling
-    - blocks_to_swap: Memory management aggressiveness
-    - prefetch_blocks: Prefetch optimization
-    - attention_mode: Attention mechanism (sageattn for Hopper, sdpa otherwise)
-    - frame_window_size: Processing window size (larger = slower but better temporal consistency)
-    - steps: Inference steps (can be reduced for speed)
-    
-    VRAM tiers:
-    - >= 40GB: Maximum speed + quality (large windows, no offloading, no tiling)
-    - 32-39GB: High performance (medium windows, no main offload)
-    - 24-31GB: Balanced (smaller windows, selective tiling, no main offload)
-    - < 24GB: Conservative (smallest windows, full memory management)
+    Settings adjusted based on resolution and video length:
+    - 480p: Maximum quality (6 steps), no tiling
+    - 720p short (<20s): Maximum speed (4 steps), no tiling
+    - 720p long (>20s): Balanced (4 steps), tiling for safety
     """
-    # Detect VRAM
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode == 0:
-            vram_mb = int(float(result.stdout.strip()))
-        else:
-            logger.warning("Failed to detect VRAM, using conservative settings")
-            vram_mb = 24000  # Default to conservative
-    except Exception as e:
-        logger.warning(f"VRAM detection error: {e}, using conservative settings")
-        vram_mb = 24000
-    
-    # Detect GPU compute capability for attention optimization
+    # Verify GPU is RTX 5090
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
@@ -188,125 +144,76 @@ def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81) -> dict:
             text=True,
             timeout=5
         )
-        if result.returncode == 0:
-            compute_cap = result.stdout.strip()
-        else:
-            compute_cap = "unknown"
-    except Exception:
-        compute_cap = "unknown"
+        compute_cap = result.stdout.strip() if result.returncode == 0 else "unknown"
+        
+        # Verify Blackwell architecture (SM 12.x)
+        if not compute_cap.startswith("12."):
+            logger.warning(f"⚠️  Non-5090 GPU detected (SM {compute_cap}). This build is optimized for RTX 5090 (SM 12.0) only.")
+    except Exception as e:
+        logger.warning(f"GPU detection failed: {e}")
+        compute_cap = "12.0"
     
-    logger.info(f"Detected VRAM: {vram_mb}MB - optimizing workflow settings")
+    logger.info(f"🚀 RTX 5090 Optimization | Resolution: {resolution} | Frames: {max_frames}")
     
-    # Optimize attention mode for advanced GPU architectures
-    if compute_cap.startswith("10."):  # Blackwell (RTX 5090, B100, B200)
-        attention_mode = "sageattn"
-        logger.info(f"Blackwell GPU detected (SM {compute_cap}): using SageAttention for optimal performance")
-    elif compute_cap.startswith("9."):  # Hopper (H100, H200)
-        attention_mode = "sageattn"
-        logger.info(f"Hopper GPU detected (SM {compute_cap}): using SageAttention for ~10-15% speedup")
-    else:
-        attention_mode = "sdpa"
-        logger.info(f"GPU (SM {compute_cap}): using SDPA attention")
+    # RTX 5090 base settings (32GB VRAM, Blackwell)
+    attention_mode = "sageattn"  # Blackwell-optimized attention
+    force_offload = False  # Keep everything in VRAM
+    blocks_to_swap = 8  # Aggressive (minimal swapping)
+    prefetch_blocks = 3  # Maximum prefetch
+    frame_window_size = 81  # Standard window
     
-    # Determine optimal settings based on VRAM
-    if vram_mb >= 40000:
-        # Very High VRAM (40GB+): Maximum speed and quality, large windows
-        logger.info("Very High VRAM mode: Large windows, no offloading, no tiling")
-        force_offload = False
+    # Resolution and length-specific optimizations
+    if resolution == "720p":
+        if max_frames <= 520:  # Short videos (~20 seconds)
+            # Optimal: No tiling, aggressive speed
+            tiled_vae = False
+            enable_vae_tiling = False
+            steps = 4
+            logger.info("📊 720p short: Maximum speed (no tiling, 4 steps)")
+        else:  # Long videos (>20s)
+            # Safety: Enable tiling, maintain speed
+            tiled_vae = True
+            enable_vae_tiling = True
+            steps = 4
+            blocks_to_swap = 10  # Slightly more conservative
+            logger.info("📊 720p long: Balanced (tiling enabled, 4 steps)")
+    else:  # 480p
+        # 480p is easy for 5090 - prioritize quality
         tiled_vae = False
         enable_vae_tiling = False
-        blocks_to_swap = 8
-        prefetch_blocks = 3
-        frame_window_size = 121  # Larger window for better consistency but slower
-        
-    elif vram_mb >= 30000:
-        # High VRAM (30-39GB): Optimized for RTX 5090, 4090, A6000
-        logger.info("High VRAM mode (30-39GB): Optimized for RTX 5090/4090 - VAE tiling enabled for safety")
-        force_offload = False
-        tiled_vae = True     # Enable VAE tiling to prevent OOM
-        enable_vae_tiling = True
-        blocks_to_swap = 12  # Moderate block management for safety
-        prefetch_blocks = 2  # Conservative prefetching
-        frame_window_size = 81  # Safe window size
-        
-    elif vram_mb >= 24000:
-        # Medium VRAM (24-29GB): Balanced with smaller windows for speed
-        logger.info("Medium VRAM mode: Smaller windows, selective tiling for speed")
-        force_offload = False  # Keep main model in VRAM
-        tiled_vae = True       # Enable VAE tiling for safety
-        enable_vae_tiling = True
-        blocks_to_swap = 15
-        prefetch_blocks = 2
-        frame_window_size = 81  # Standard window
-        
-    else:
-        # Low VRAM (<24GB): Conservative with smallest windows
-        logger.info("Low VRAM mode: Smallest windows, full memory management")
-        force_offload = True
-        tiled_vae = True
-        enable_vae_tiling = True
-        blocks_to_swap = 20
-        prefetch_blocks = 2
-        frame_window_size = 65  # Smaller window for memory savings
-    
-    # For very long videos, reduce window size to prevent OOM
-    if max_frames > 1000:
-        # Very long videos (>40 seconds) - use conservative settings
-        logger.info(f"Very long video detected ({max_frames} frames), using conservative window size")
-        frame_window_size = 65  # Small window for all GPUs to prevent OOM
-    elif max_frames > 400:
-        # Long videos (16-40 seconds) - moderate settings
-        logger.info(f"Long video detected ({max_frames} frames), using moderate window size")
-        if vram_mb >= 30000:
-            frame_window_size = min(frame_window_size, 81)  # Cap at 81
-        else:
-            frame_window_size = min(frame_window_size, 65)  # More conservative
-    
-    # Optimize inference steps for very long videos to maintain reasonable generation times
-    # RTX 5090's high performance allows us to use slightly lower steps without major quality loss
-    steps = 6  # Default quality
-    if max_frames > 1500:  # Videos >60 seconds
-        steps = 5
-        logger.info(f"Extra long video ({max_frames} frames): reducing steps to {steps} for speed")
-    elif max_frames > 1000:  # Videos >40 seconds
-        steps = 5
-        logger.info(f"Very long video ({max_frames} frames): reducing steps to {steps} for speed")
+        steps = 6 if max_frames <= 400 else 5
+        logger.info(f"📊 480p: High quality ({steps} steps, no tiling)")
     
     # Apply settings to workflow nodes
     settings_applied = []
     
-    # Apply attention mode to WanVideoModelLoader
     if "122" in prompt:
         prompt["122"]["inputs"]["attention_mode"] = attention_mode
-        settings_applied.append(f"Node 122 (ModelLoader): attention_mode={attention_mode}")
+        settings_applied.append("SageAttention")
     
-    if "128" in prompt:  # WanVideoSampler
+    if "128" in prompt:
         prompt["128"]["inputs"]["force_offload"] = force_offload
         prompt["128"]["inputs"]["steps"] = steps
-        settings_applied.append(f"Node 128 (Sampler): force_offload={force_offload}, steps={steps}")
+        settings_applied.append(f"{steps} steps")
     
-    if "192" in prompt:  # WanVideoImageToVideoMultiTalk (I2V node)
+    if "192" in prompt:
         prompt["192"]["inputs"]["force_offload"] = force_offload
         prompt["192"]["inputs"]["tiled_vae"] = tiled_vae
         prompt["192"]["inputs"]["frame_window_size"] = frame_window_size
-        settings_applied.append(f"Node 192 (I2V): force_offload={force_offload}, tiled_vae={tiled_vae}, frame_window_size={frame_window_size}")
+        settings_applied.append(f"VAE tiling: {tiled_vae}")
     
-    if "130" in prompt:  # WanVideoDecode
+    if "130" in prompt:
         prompt["130"]["inputs"]["enable_vae_tiling"] = enable_vae_tiling
-        settings_applied.append(f"Node 130 (VAE Decode): enable_vae_tiling={enable_vae_tiling}")
     
-    if "229" in prompt:  # WanVideoEncode (V2V only)
+    if "229" in prompt:
         prompt["229"]["inputs"]["enable_vae_tiling"] = enable_vae_tiling
-        settings_applied.append(f"Node 229 (VAE Encode): enable_vae_tiling={enable_vae_tiling}")
     
-    if "134" in prompt:  # WanVideoBlockSwap
+    if "134" in prompt:
         prompt["134"]["inputs"]["blocks_to_swap"] = blocks_to_swap
         prompt["134"]["inputs"]["prefetch_blocks"] = prefetch_blocks
-        settings_applied.append(f"Node 134 (BlockSwap): blocks_to_swap={blocks_to_swap}, prefetch={prefetch_blocks}")
+        settings_applied.append(f"BlockSwap: {blocks_to_swap}")
     
-    logger.info(f"Applied {len(settings_applied)} optimizations:")
-    for setting in settings_applied:
-        logger.info(f"  - {setting}")
+    logger.info(f"✅ Applied: {', '.join(settings_applied)}")
     
     return prompt
 
@@ -356,11 +263,7 @@ def get_history(prompt_id: str) -> dict:
         return json.loads(response.read())
 
 def get_video_filepaths(ws, prompt, input_type="image", person_count="single"):
-    """
-    Submit prompt, wait for completion, then read ComfyUI history and
-    collect output video file paths from VHS VideoCombine nodes ("gifs" array with fullpath).
-    Returns dict[node_id] -> [file_path, ...]
-    """
+    """Submit prompt, wait for completion, then read ComfyUI history."""
     prompt_id = queue_prompt(prompt, input_type, person_count)["prompt_id"]
     outputs = {}
 
@@ -372,12 +275,10 @@ def get_video_filepaths(ws, prompt, input_type="image", person_count="single"):
                 data = message.get("data", {})
                 if data.get("node") is None and data.get("prompt_id") == prompt_id:
                     break
-        # Binary messages ignored
 
     history = get_history(prompt_id)[prompt_id]
     for node_id, node_output in history.get("outputs", {}).items():
         paths = []
-        # ComfyUI VHS_VideoCombine uses 'gifs' with 'fullpath' for video artifacts
         if "gifs" in node_output:
             for vid in node_output["gifs"]:
                 if "fullpath" in vid and os.path.exists(vid["fullpath"]):
@@ -400,19 +301,15 @@ def get_workflow_path(input_type: str, person_count: str) -> str:
         return "/V2V_single.json" if person_count == "single" else "/V2V_multi.json"
 
 def validate_workflow_nodes(prompt: dict, input_type: str, person_count: str) -> None:
-    """
-    Validate that required nodes exist in the workflow before execution.
-    Raises exception if critical nodes are missing.
-    """
-    required_nodes = ["125", "241", "245", "246", "270"]  # Audio, text, width, height, max_frame
+    """Validate that required nodes exist in the workflow before execution."""
+    required_nodes = ["125", "241", "245", "246", "270"]
     
     if input_type == "image":
-        required_nodes.append("284")  # Image input node
+        required_nodes.append("284")
     else:
-        required_nodes.append("228")  # Video input node
+        required_nodes.append("228")
     
     if person_count == "multi":
-        # Check for second audio node (different IDs for I2V vs V2V)
         if input_type == "image":
             required_nodes.append("307")
         else:
@@ -452,14 +349,10 @@ def calculate_max_frames_from_audio(wav_1: str, wav_2: str | None = None, fps: i
     logger.info(f"Longest audio {max_duration:.2f}s -> max_frames {max_frames}")
     return max_frames
 
-def pick_dimensions(aspect_ratio: str | None, resolution: str | None) -> tuple[int, int]:
+def pick_dimensions(aspect_ratio: str | None, resolution: str | None) -> tuple[int, int, str]:
     """
-    Choose (width, height) from aspect_ratio + resolution.
-    Valid aspect_ratio: "16:9" or "9:16" (default 9:16 if missing/invalid).
-    Valid resolution: "480p" or "720p" (default 480p if missing/invalid).
-    Mappings:
-      16:9  -> 854x480 or 1280x720
-      9:16  -> 480x854 or 720x1280
+    Choose (width, height, resolution_str) from aspect_ratio + resolution.
+    Returns the resolution string for optimizer.
     """
     ar = (aspect_ratio or "9:16").strip()
     res = (resolution or "480p").strip().lower()
@@ -472,9 +365,11 @@ def pick_dimensions(aspect_ratio: str | None, resolution: str | None) -> tuple[i
         res = "480p"
 
     if ar == "16:9":
-        return (1280, 720) if res == "720p" else (854, 480)
+        dims = (1280, 720) if res == "720p" else (854, 480)
     else:  # 9:16
-        return (720, 1280) if res == "720p" else (480, 854)
+        dims = (720, 1280) if res == "720p" else (480, 854)
+    
+    return (*dims, res)
 
 # -----------------------------
 # Main handler
@@ -488,13 +383,13 @@ def handler(job):
     os.makedirs(task_dir, exist_ok=True)
 
     try:
-        # Reject width/height if present; only aspect_ratio + resolution are allowed
+        # Reject width/height if present
         if "width" in job_input or "height" in job_input:
             return {"error": "Inputs 'width' and 'height' are not allowed. Use 'aspect_ratio' and 'resolution'."}
 
         # Input type & persons
-        input_type = job_input.get("input_type", "image")          # "image" | "video"
-        person_count = job_input.get("person_count", "single")     # "single" | "multi"
+        input_type = job_input.get("input_type", "image")
+        person_count = job_input.get("person_count", "single")
         
         if input_type not in {"image", "video"}:
             return {"error": f"Invalid input_type '{input_type}'. Must be 'image' or 'video'."}
@@ -546,10 +441,10 @@ def handler(job):
         # Text and derived size
         prompt_text = job_input.get("prompt", "A person talking naturally")
 
-        # Always derive width/height from aspect_ratio + resolution (defaults: 9:16 @ 480p)
+        # Get dimensions and resolution
         ar = job_input.get("aspect_ratio")
-        res = job_input.get("resolution")
-        width, height = pick_dimensions(ar, res)
+        res_input = job_input.get("resolution")
+        width, height, resolution = pick_dimensions(ar, res_input)
         logger.info(f"Using dimensions from aspect_ratio/resolution -> width={width}, height={height}")
 
         # max_frame auto by audio length unless user provides
@@ -572,8 +467,8 @@ def handler(job):
         # Validate workflow has required nodes
         validate_workflow_nodes(prompt, input_type, person_count)
 
-        # OPTIMIZE WORKFLOW FOR GPU (dynamically adjust settings based on VRAM and video length)
-        prompt = optimize_workflow_for_gpu(prompt, max_frames=max_frame)
+        # OPTIMIZE WORKFLOW FOR RTX 5090
+        prompt = optimize_workflow_for_gpu(prompt, max_frames=max_frame, resolution=resolution)
 
         # Existence and validation checks
         if not os.path.exists(media_local_path):
@@ -610,7 +505,6 @@ def handler(job):
         prompt["270"]["inputs"]["value"] = max_frame
 
         if person_count == "multi":
-            # I2V_multi.json uses node 307, V2V_multi.json uses node 313
             audio_2_node = "307" if input_type == "image" else "313"
             if audio_2_node not in prompt:
                 return {"error": f"Expected node {audio_2_node} not found in {input_type} multi workflow"}
@@ -634,7 +528,7 @@ def handler(job):
 
         # WS connect (up to 5 min)
         ws = websocket.WebSocket()
-        for attempt in range(60):  # 5s × 60 = 5 min
+        for attempt in range(60):
             try:
                 ws.connect(ws_url)
                 logger.info(f"WebSocket connected (attempt {attempt+1})")
