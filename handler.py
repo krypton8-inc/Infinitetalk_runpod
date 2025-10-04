@@ -43,6 +43,9 @@ DEFAULT_MULTI_AUDIO_URL_2 = "https://krypton8.s3.us-east-1.amazonaws.com/multi_t
 def download_file_from_url(url: str, output_path: str) -> str:
     """Download a file from URL -> output_path with wget (fast, handles redirects)."""
     try:
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
         result = subprocess.run(
             ["wget", "-O", output_path, "--no-verbose", "--timeout=45", url],
             capture_output=True,
@@ -66,9 +69,10 @@ def _out_with_ext(url: str, base_without_ext: str, default_ext: str = ".wav") ->
     """
     Build an output path preserving the extension from the URL path.
     Falls back to default_ext if no extension is present.
+    Returns ABSOLUTE path.
     """
     ext = os.path.splitext(urlparse(url).path)[1] or default_ext
-    return base_without_ext + ext
+    return os.path.abspath(base_without_ext + ext)
 
 def ensure_url_only(field_name: str, job_input: dict) -> str | None:
     """
@@ -310,7 +314,8 @@ def handler(job):
 
     logger.info(f"Received job input: {job_input}")
     task_id = f"task_{uuid.uuid4()}"
-    os.makedirs(task_id, exist_ok=True)
+    task_dir = os.path.abspath(task_id)
+    os.makedirs(task_dir, exist_ok=True)
 
     try:
         # Reject width/height if present; only aspect_ratio + resolution are allowed
@@ -337,7 +342,7 @@ def handler(job):
         if input_type == "image":
             default_img = DEFAULT_MULTI_IMAGE_URL if person_count == "multi" else DEFAULT_IMAGE_URL
             image_url = ensure_url_only("image_url", job_input) or default_img
-            out_img = _out_with_ext(image_url, os.path.join(task_id, "input_image"), default_ext=".png")
+            out_img = _out_with_ext(image_url, os.path.join(task_dir, "input_image"), default_ext=".png")
             media_local_path = download_file_from_url(image_url, out_img)
             if not job_input.get("image_url"):
                 which = "multi default" if person_count == "multi" else "single default"
@@ -346,7 +351,7 @@ def handler(job):
             video_url = ensure_url_only("video_url", job_input)
             if not video_url:
                 return {"error": "For input_type='video', you must provide 'video_url'."}
-            out_vid = _out_with_ext(video_url, os.path.join(task_id, "input_video"), default_ext=".mp4")
+            out_vid = _out_with_ext(video_url, os.path.join(task_dir, "input_video"), default_ext=".mp4")
             media_local_path = download_file_from_url(video_url, out_vid)
 
         # Audio (URL-only)
@@ -355,7 +360,7 @@ def handler(job):
 
         default_audio_1 = DEFAULT_MULTI_AUDIO_URL_1 if person_count == "multi" else DEFAULT_AUDIO_URL
         wav_url = ensure_url_only("wav_url", job_input) or default_audio_1
-        out = _out_with_ext(wav_url, os.path.join(task_id, "input_audio"), default_ext=".wav")
+        out = _out_with_ext(wav_url, os.path.join(task_dir, "input_audio"), default_ext=".wav")
         wav_path_1 = download_file_from_url(wav_url, out)
         if not job_input.get("wav_url"):
             which = "multi default #1" if person_count == "multi" else "single default"
@@ -363,7 +368,7 @@ def handler(job):
 
         if person_count == "multi":
             wav_url_2 = ensure_url_only("wav_url_2", job_input) or DEFAULT_MULTI_AUDIO_URL_2
-            out2 = _out_with_ext(wav_url_2, os.path.join(task_id, "input_audio_2"), default_ext=".wav")
+            out2 = _out_with_ext(wav_url_2, os.path.join(task_dir, "input_audio_2"), default_ext=".wav")
             wav_path_2 = download_file_from_url(wav_url_2, out2)
             if not job_input.get("wav_url_2"):
                 logger.info("No wav_url_2 provided; using multi default #2 audio URL.")
@@ -397,20 +402,29 @@ def handler(job):
         # Validate workflow has required nodes
         validate_workflow_nodes(prompt, input_type, person_count)
 
-        # Existence checks
+        # Existence and validation checks
         if not os.path.exists(media_local_path):
             return {"error": f"Media file not found: {media_local_path}"}
+        if os.path.getsize(media_local_path) == 0:
+            return {"error": f"Media file is empty: {media_local_path}"}
+            
         if not os.path.exists(wav_path_1):
             return {"error": f"Audio file not found: {wav_path_1}"}
-        if person_count == "multi" and wav_path_2 and not os.path.exists(wav_path_2):
-            return {"error": f"Second audio file not found: {wav_path_2}"}
+        if os.path.getsize(wav_path_1) == 0:
+            return {"error": f"Audio file is empty: {wav_path_1}"}
+            
+        if person_count == "multi" and wav_path_2:
+            if not os.path.exists(wav_path_2):
+                return {"error": f"Second audio file not found: {wav_path_2}"}
+            if os.path.getsize(wav_path_2) == 0:
+                return {"error": f"Second audio file is empty: {wav_path_2}"}
 
         logger.info(f"Media size: {os.path.getsize(media_local_path)} bytes")
         logger.info(f"Audio #1 size: {os.path.getsize(wav_path_1)} bytes")
         if person_count == "multi" and wav_path_2:
             logger.info(f"Audio #2 size: {os.path.getsize(wav_path_2)} bytes")
 
-        # Bind inputs to workflow
+        # Bind inputs to workflow (using absolute paths)
         if input_type == "image":
             prompt["284"]["inputs"]["image"] = media_local_path
         else:
