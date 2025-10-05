@@ -1,17 +1,18 @@
+import runpod
+from runpod.serverless.utils import rp_upload  # kept for compatibility if you use it elsewhere
 import os
+import websocket
+import base64
 import json
 import uuid
-import time
-import base64
 import logging
 import urllib.request
-import urllib.error
+import urllib.parse
+import binascii  # for Base64 errors
 import subprocess
-import websocket
+import time
 import librosa
 from urllib.parse import urlparse
-
-import runpod
 
 # Optional S3 (only used if all env vars are present)
 try:
@@ -20,84 +21,28 @@ try:
 except Exception:
     boto3 = None
 
-
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SERVER_ADDRESS = os.getenv("SERVER_ADDRESS", "127.0.0.1")
-CLIENT_ID = str(uuid.uuid4())
+server_address = os.getenv("SERVER_ADDRESS", "127.0.0.1")
+client_id = str(uuid.uuid4())
 
-# Default sample assets - these are test assets hosted in a public S3 bucket
-# If your bucket becomes private, update these URLs or remove defaults entirely
+# ------------------------------------------------------------------
+# Default sample assets - test assets hosted in a public S3 bucket
+# If your bucket becomes private, update these URLs or remove defaults
+# ------------------------------------------------------------------
 DEFAULT_IMAGE_URL = "https://krypton8.s3.us-east-1.amazonaws.com/test_image.png"
 DEFAULT_AUDIO_URL = "https://krypton8.s3.us-east-1.amazonaws.com/test_audio.wav"
-
-# Defaults specifically for multi-person inputs
 DEFAULT_MULTI_IMAGE_URL = "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_image.png"
-DEFAULT_MULTI_AUDIO_URL_1 = "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_audio.wav"
-DEFAULT_MULTI_AUDIO_URL_2 = "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_audio2.wav"
+DEFAULT_MULTI_AUDIO_URL_1 = "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_audio2.wav"
+DEFAULT_MULTI_AUDIO_URL_2 = "https://krypton8.s3.us-east-1.amazonaws.com/multi_test_audio.wav"
 
 # -----------------------------
-# Helpers (downloads, S3, etc.)
+# S3 helpers
 # -----------------------------
-def download_file_from_url(url: str, output_path: str) -> str:
-    """Download a file from URL -> output_path with wget (fast, handles redirects)."""
-    try:
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
-        result = subprocess.run(
-            ["wget", "-O", output_path, "--no-verbose", "--timeout=45", url],
-            capture_output=True,
-            text=True,
-            timeout=90,
-        )
-        if result.returncode == 0:
-            logger.info(f"Downloaded: {url} -> {output_path}")
-            return output_path
-        else:
-            logger.error(f"wget failed for {url}: {result.stderr}")
-            raise Exception(f"URL download failed: {result.stderr}")
-    except subprocess.TimeoutExpired:
-        logger.error(f"Download timeout for {url}")
-        raise Exception(f"Download timeout for {url}")
-    except Exception as e:
-        logger.error(f"Download error for {url}: {e}")
-        raise Exception(f"Download error: {e}")
-
-def _out_with_ext(url: str, base_without_ext: str, default_ext: str = ".wav") -> str:
-    """
-    Build an output path preserving the extension from the URL path.
-    Falls back to default_ext if no extension is present.
-    Returns ABSOLUTE path.
-    """
-    ext = os.path.splitext(urlparse(url).path)[1] or default_ext
-    return os.path.abspath(base_without_ext + ext)
-
-def ensure_url_only(field_name: str, job_input: dict) -> str | None:
-    """
-    Enforce URL-only inputs (image_url, video_url, wav_url, wav_url_2).
-    Returns the URL string if present, else None.
-    Ignores/blocks *_path and *_base64 to avoid unsupported input types.
-    """
-    url = job_input.get(field_name)
-    if url:
-        return url
-
-    # If the user sent *_path or *_base64, explicitly reject to be clear
-    path_key = field_name.replace("_url", "_path")
-    b64_key = field_name.replace("_url", "_base64")
-    if job_input.get(path_key) or job_input.get(b64_key):
-        raise Exception(
-            f"Input '{field_name}' must be a URL. Local paths and base64 are not supported."
-        )
-    return None
-
 def s3_configured() -> bool:
-    return all(
-        os.getenv(k)
-        for k in ["S3_REGION", "S3_BUCKET", "S3_KEY", "S3_SECRET"]
-    )
+    return all(os.getenv(k) for k in ["S3_REGION", "S3_BUCKET", "S3_KEY", "S3_SECRET"])
 
 def s3_client():
     assert boto3 is not None, "boto3 is not installed in the image."
@@ -111,9 +56,9 @@ def s3_client():
 
 def s3_upload_and_url(file_path: str) -> str:
     """
-    Upload file to S3 and return the public URL.
-    If S3_PUBLIC_BASE_URL is set, use that as prefix (e.g., CloudFront).
-    Otherwise return the standard s3 URL.
+    Upload a file to S3 and return a public URL.
+    If S3_PUBLIC_BASE_URL is set, it will be used as the prefix (e.g., CloudFront).
+    Otherwise a standard S3 URL is returned.
     """
     bucket = os.getenv("S3_BUCKET")
     region = os.getenv("S3_REGION")
@@ -122,14 +67,14 @@ def s3_upload_and_url(file_path: str) -> str:
     key = f"{key_prefix.rstrip('/')}/{uuid.uuid4()}_{basename}"
 
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    
     c = s3_client()
+
+    # Best-effort content type
     extra_args = {"ContentType": "video/mp4"}
-    
-    # Log progress for large files
+
     if file_size_mb > 10:
         logger.info(f"Uploading {file_size_mb:.1f}MB to S3: {key}")
-    
+
     c.upload_file(file_path, bucket, key, ExtraArgs=extra_args)
 
     public_base = os.getenv("S3_PUBLIC_BASE_URL")
@@ -137,201 +82,91 @@ def s3_upload_and_url(file_path: str) -> str:
         public_base = public_base.rstrip("/")
         return f"{public_base}/{key}"
     else:
-        # Standard S3 URL
         return f"https://s3.{region}.amazonaws.com/{bucket}/{key}"
 
 # -----------------------------
-# GPU Optimization
+# Download and input helpers
 # -----------------------------
-def optimize_workflow_for_gpu(prompt: dict, max_frames: int = 81) -> dict:
-    """
-    Dynamically adjust workflow settings based on detected VRAM, GPU architecture, and video length.
-    
-    Settings adjusted:
-    - force_offload: Controls model unloading between windows
-    - tiled_vae: VAE tiling (affects quality)
-    - enable_vae_tiling: VAE encode/decode tiling
-    - blocks_to_swap: Memory management aggressiveness
-    - prefetch_blocks: Prefetch optimization
-    - attention_mode: Attention mechanism (sageattn for Hopper, sdpa otherwise)
-    - frame_window_size: Processing window size (larger = slower but better temporal consistency)
-    - steps: Inference steps (can be reduced for speed)
-    
-    VRAM tiers:
-    - >= 40GB: Maximum speed + quality (large windows, no offloading, no tiling)
-    - 32-39GB: High performance (medium windows, no main offload)
-    - 24-31GB: Balanced (smaller windows, selective tiling, no main offload)
-    - < 24GB: Conservative (smallest windows, full memory management)
-    """
-    # Detect VRAM
+def download_file_from_url(url, output_path):
+    """Download a file from a URL to output_path using wget."""
     try:
+        # Ensure target directory exists
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            ["wget", "-O", output_path, "--no-verbose", "--timeout=45", url],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=90,
         )
         if result.returncode == 0:
-            vram_mb = int(float(result.stdout.strip()))
+            logger.info(f"Downloaded: {url} -> {output_path}")
+            return output_path
         else:
-            logger.warning("Failed to detect VRAM, using conservative settings")
-            vram_mb = 24000  # Default to conservative
+            logger.error(f"wget failed: {result.stderr}")
+            raise Exception(f"URL download failed: {result.stderr}")
+    except subprocess.TimeoutExpired:
+        logger.error("Download timeout")
+        raise Exception("Download timeout")
     except Exception as e:
-        logger.warning(f"VRAM detection error: {e}, using conservative settings")
-        vram_mb = 24000
-    
-    # Detect GPU compute capability for attention optimization
+        logger.error(f"Download error: {e}")
+        raise Exception(f"Download error: {e}")
+
+def save_base64_to_file(base64_data, temp_dir, output_filename):
+    """Decode base64 and save to file."""
     try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode == 0:
-            compute_cap = result.stdout.strip()
-        else:
-            compute_cap = "unknown"
-    except Exception:
-        compute_cap = "unknown"
-    
-    logger.info(f"Detected VRAM: {vram_mb}MB - optimizing workflow settings")
-    
-    # Optimize attention mode for advanced GPU architectures
-    if compute_cap.startswith("10."):  # Blackwell (RTX 5090, B100, B200)
-        attention_mode = "sageattn"
-        logger.info(f"Blackwell GPU detected (SM {compute_cap}): using SageAttention for optimal performance")
-    elif compute_cap.startswith("9."):  # Hopper (H100, H200)
-        attention_mode = "sageattn"
-        logger.info(f"Hopper GPU detected (SM {compute_cap}): using SageAttention for ~10-15% speedup")
+        decoded_data = base64.b64decode(base64_data)
+        os.makedirs(temp_dir, exist_ok=True)
+        file_path = os.path.abspath(os.path.join(temp_dir, output_filename))
+        with open(file_path, "wb") as f:
+            f.write(decoded_data)
+        logger.info(f"Saved base64 input to file: {file_path}")
+        return file_path
+    except (binascii.Error, ValueError) as e:
+        logger.error(f"Base64 decode failed: {e}")
+        raise Exception(f"Base64 decode failed: {e}")
+
+def process_input(input_data, temp_dir, output_filename, input_type):
+    """
+    Turn input_data into a local file path.
+    input_type: 'path' | 'url' | 'base64'
+    """
+    if input_type == "path":
+        logger.info(f"Using provided path: {input_data}")
+        return input_data
+    elif input_type == "url":
+        logger.info(f"Downloading from URL: {input_data}")
+        os.makedirs(temp_dir, exist_ok=True)
+        file_path = os.path.abspath(os.path.join(temp_dir, output_filename))
+        return download_file_from_url(input_data, file_path)
+    elif input_type == "base64":
+        logger.info("Decoding base64 input")
+        return save_base64_to_file(input_data, temp_dir, output_filename)
     else:
-        attention_mode = "sdpa"
-        logger.info(f"GPU (SM {compute_cap}): using SDPA attention")
-    
-    # Determine optimal settings based on VRAM
-    if vram_mb >= 40000:
-        # Very High VRAM (40GB+): Maximum speed and quality, large windows
-        logger.info("Very High VRAM mode: Large windows, no offloading, no tiling")
-        force_offload = False
-        tiled_vae = False
-        enable_vae_tiling = False
-        blocks_to_swap = 8
-        prefetch_blocks = 3
-        frame_window_size = 121  # Larger window for better consistency but slower
-        
-    elif vram_mb >= 30000:
-        # High VRAM (30-39GB): Optimized for RTX 5090, 4090, A6000
-        logger.info("High VRAM mode (30-39GB): Optimized for RTX 5090/4090 - VAE tiling enabled for safety")
-        force_offload = False
-        tiled_vae = True     # Enable VAE tiling to prevent OOM
-        enable_vae_tiling = True
-        blocks_to_swap = 12  # Moderate block management for safety
-        prefetch_blocks = 2  # Conservative prefetching
-        frame_window_size = 81  # Safe window size
-        
-    elif vram_mb >= 24000:
-        # Medium VRAM (24-29GB): Balanced with smaller windows for speed
-        logger.info("Medium VRAM mode: Smaller windows, selective tiling for speed")
-        force_offload = False  # Keep main model in VRAM
-        tiled_vae = True       # Enable VAE tiling for safety
-        enable_vae_tiling = True
-        blocks_to_swap = 15
-        prefetch_blocks = 2
-        frame_window_size = 81  # Standard window
-        
-    else:
-        # Low VRAM (<24GB): Conservative with smallest windows
-        logger.info("Low VRAM mode: Smallest windows, full memory management")
-        force_offload = True
-        tiled_vae = True
-        enable_vae_tiling = True
-        blocks_to_swap = 20
-        prefetch_blocks = 2
-        frame_window_size = 65  # Smaller window for memory savings
-    
-    # For very long videos, reduce window size to prevent OOM
-    if max_frames > 1000:
-        # Very long videos (>40 seconds) - use conservative settings
-        logger.info(f"Very long video detected ({max_frames} frames), using conservative window size")
-        frame_window_size = 65  # Small window for all GPUs to prevent OOM
-    elif max_frames > 400:
-        # Long videos (16-40 seconds) - moderate settings
-        logger.info(f"Long video detected ({max_frames} frames), using moderate window size")
-        if vram_mb >= 30000:
-            frame_window_size = min(frame_window_size, 81)  # Cap at 81
-        else:
-            frame_window_size = min(frame_window_size, 65)  # More conservative
-    
-    # Optimize inference steps for very long videos to maintain reasonable generation times
-    # RTX 5090's high performance allows us to use slightly lower steps without major quality loss
-    steps = 6  # Default quality
-    if max_frames > 1500:  # Videos >60 seconds
-        steps = 5
-        logger.info(f"Extra long video ({max_frames} frames): reducing steps to {steps} for speed")
-    elif max_frames > 1000:  # Videos >40 seconds
-        steps = 5
-        logger.info(f"Very long video ({max_frames} frames): reducing steps to {steps} for speed")
-    
-    # Apply settings to workflow nodes
-    settings_applied = []
-    
-    # Apply attention mode to WanVideoModelLoader
-    if "122" in prompt:
-        prompt["122"]["inputs"]["attention_mode"] = attention_mode
-        settings_applied.append(f"Node 122 (ModelLoader): attention_mode={attention_mode}")
-    
-    if "128" in prompt:  # WanVideoSampler
-        prompt["128"]["inputs"]["force_offload"] = force_offload
-        prompt["128"]["inputs"]["steps"] = steps
-        settings_applied.append(f"Node 128 (Sampler): force_offload={force_offload}, steps={steps}")
-    
-    if "192" in prompt:  # WanVideoImageToVideoMultiTalk (I2V node)
-        prompt["192"]["inputs"]["force_offload"] = force_offload
-        prompt["192"]["inputs"]["tiled_vae"] = tiled_vae
-        prompt["192"]["inputs"]["frame_window_size"] = frame_window_size
-        settings_applied.append(f"Node 192 (I2V): force_offload={force_offload}, tiled_vae={tiled_vae}, frame_window_size={frame_window_size}")
-    
-    if "130" in prompt:  # WanVideoDecode
-        prompt["130"]["inputs"]["enable_vae_tiling"] = enable_vae_tiling
-        settings_applied.append(f"Node 130 (VAE Decode): enable_vae_tiling={enable_vae_tiling}")
-    
-    if "229" in prompt:  # WanVideoEncode (V2V only)
-        prompt["229"]["inputs"]["enable_vae_tiling"] = enable_vae_tiling
-        settings_applied.append(f"Node 229 (VAE Encode): enable_vae_tiling={enable_vae_tiling}")
-    
-    if "134" in prompt:  # WanVideoBlockSwap
-        prompt["134"]["inputs"]["blocks_to_swap"] = blocks_to_swap
-        prompt["134"]["inputs"]["prefetch_blocks"] = prefetch_blocks
-        settings_applied.append(f"Node 134 (BlockSwap): blocks_to_swap={blocks_to_swap}, prefetch={prefetch_blocks}")
-    
-    logger.info(f"Applied {len(settings_applied)} optimizations:")
-    for setting in settings_applied:
-        logger.info(f"  - {setting}")
-    
-    return prompt
+        raise Exception(f"Unsupported input type: {input_type}")
 
 # -----------------------------
 # ComfyUI prompt I/O
 # -----------------------------
-def queue_prompt(prompt: dict, input_type="image", person_count="single"):
-    url = f"http://{SERVER_ADDRESS}:8188/prompt"
+def queue_prompt(prompt, input_type="image", person_count="single"):
+    url = f"http://{server_address}:8188/prompt"
     logger.info(f"Queueing prompt to: {url}")
-    p = {"prompt": prompt, "client_id": CLIENT_ID}
+    p = {"prompt": prompt, "client_id": client_id}
     data = json.dumps(p).encode("utf-8")
 
-    # Debug log for key nodes
-    logger.info(f"Nodes in workflow: {len(prompt)}")
+    # Debug
+    logger.info(f"Workflow node count: {len(prompt)}")
     if input_type == "image":
-        logger.info(f"Image node(284): {prompt.get('284', {}).get('inputs', {}).get('image', 'NOT_SET')}")
+        logger.info(f"Image node(284): {prompt.get('284', {}).get('inputs', {}).get('image', 'NOT_FOUND')}")
     else:
-        logger.info(f"Video node(228): {prompt.get('228', {}).get('inputs', {}).get('video', 'NOT_SET')}")
-    logger.info(f"Audio node(125): {prompt.get('125', {}).get('inputs', {}).get('audio', 'NOT_SET')}")
-    logger.info(f"Text node(241): {prompt.get('241', {}).get('inputs', {}).get('positive_prompt', 'NOT_SET')}")
+        logger.info(f"Video node(228): {prompt.get('228', {}).get('inputs', {}).get('video', 'NOT_FOUND')}")
+    logger.info(f"Audio node(125): {prompt.get('125', {}).get('inputs', {}).get('audio', 'NOT_FOUND')}")
+    logger.info(f"Text node(241): {prompt.get('241', {}).get('inputs', {}).get('positive_prompt', 'NOT_FOUND')}")
     if person_count == "multi":
         if "307" in prompt:
-            logger.info(f"Second audio node(307): {prompt.get('307', {}).get('inputs', {}).get('audio', 'NOT_SET')}")
+            logger.info(f"Second audio node(307): {prompt.get('307', {}).get('inputs', {}).get('audio', 'NOT_FOUND')}")
         elif "313" in prompt:
-            logger.info(f"Second audio node(313): {prompt.get('313', {}).get('inputs', {}).get('audio', 'NOT_SET')}")
+            logger.info(f"Second audio node(313): {prompt.get('313', {}).get('inputs', {}).get('audio', 'NOT_FOUND')}")
 
     req = urllib.request.Request(url, data=data)
     req.add_header("Content-Type", "application/json")
@@ -342,16 +177,16 @@ def queue_prompt(prompt: dict, input_type="image", person_count="single"):
         logger.info(f"Prompt queued OK: {result}")
         return result
     except urllib.error.HTTPError as e:
-        error_body = e.read().decode('utf-8')
         logger.error(f"HTTP error: {e.code} - {e.reason}")
-        logger.error(f"Response body: {error_body}")
-        raise Exception(f"ComfyUI HTTP {e.code}: {error_body}")
+        logger.error(f"Response body: {e.read().decode('utf-8')}")
+        raise
     except Exception as e:
-        logger.error(f"Queue prompt error: {e}")
+        logger.error(f"Error queueing prompt: {e}")
         raise
 
-def get_history(prompt_id: str) -> dict:
-    url = f"http://{SERVER_ADDRESS}:8188/history/{prompt_id}"
+def get_history(prompt_id):
+    url = f"http://{server_address}:8188/history/{prompt_id}"
+    logger.info(f"Getting history from: {url}")
     with urllib.request.urlopen(url) as response:
         return json.loads(response.read())
 
@@ -361,7 +196,8 @@ def get_video_filepaths(ws, prompt, input_type="image", person_count="single"):
     collect output video file paths from VHS VideoCombine nodes ("gifs" array with fullpath).
     Returns dict[node_id] -> [file_path, ...]
     """
-    prompt_id = queue_prompt(prompt, input_type, person_count)["prompt_id"]
+    result = queue_prompt(prompt, input_type, person_count)
+    prompt_id = result["prompt_id"]
     outputs = {}
 
     while True:
@@ -372,12 +208,11 @@ def get_video_filepaths(ws, prompt, input_type="image", person_count="single"):
                 data = message.get("data", {})
                 if data.get("node") is None and data.get("prompt_id") == prompt_id:
                     break
-        # Binary messages ignored
+        # ignore binary
 
     history = get_history(prompt_id)[prompt_id]
     for node_id, node_output in history.get("outputs", {}).items():
         paths = []
-        # ComfyUI VHS_VideoCombine uses 'gifs' with 'fullpath' for video artifacts
         if "gifs" in node_output:
             for vid in node_output["gifs"]:
                 if "fullpath" in vid and os.path.exists(vid["fullpath"]):
@@ -386,290 +221,240 @@ def get_video_filepaths(ws, prompt, input_type="image", person_count="single"):
 
     return outputs
 
-# -----------------------------
-# Workflow utilities
-# -----------------------------
-def load_workflow(workflow_path: str) -> dict:
-    with open(workflow_path, "r") as f:
-        return json.load(f)
+def load_workflow(workflow_path):
+    with open(workflow_path, "r") as file:
+        return json.load(file)
 
-def get_workflow_path(input_type: str, person_count: str) -> str:
+def get_workflow_path(input_type, person_count):
+    """Return the workflow file path based on input_type and person_count."""
     if input_type == "image":
         return "/I2V_single.json" if person_count == "single" else "/I2V_multi.json"
     else:
         return "/V2V_single.json" if person_count == "single" else "/V2V_multi.json"
 
-def validate_workflow_nodes(prompt: dict, input_type: str, person_count: str) -> None:
-    """
-    Validate that required nodes exist in the workflow before execution.
-    Raises exception if critical nodes are missing.
-    """
-    required_nodes = ["125", "241", "245", "246", "270"]  # Audio, text, width, height, max_frame
-    
-    if input_type == "image":
-        required_nodes.append("284")  # Image input node
-    else:
-        required_nodes.append("228")  # Video input node
-    
-    if person_count == "multi":
-        # Check for second audio node (different IDs for I2V vs V2V)
-        if input_type == "image":
-            required_nodes.append("307")
-        else:
-            required_nodes.append("313")
-    
-    missing_nodes = [node for node in required_nodes if node not in prompt]
-    
-    if missing_nodes:
-        raise Exception(
-            f"Workflow validation failed: missing required nodes {missing_nodes}. "
-            f"Workflow may have been regenerated with different node IDs."
-        )
-
-def get_audio_duration(audio_path: str) -> float | None:
+# -----------------------------
+# Audio utilities
+# -----------------------------
+def get_audio_duration(audio_path):
+    """Return duration in seconds for an audio file."""
     try:
-        return librosa.get_duration(path=audio_path)
+        duration = librosa.get_duration(path=audio_path)
+        return duration
     except Exception as e:
         logger.warning(f"Failed to get audio duration ({audio_path}): {e}")
         return None
 
-def calculate_max_frames_from_audio(wav_1: str, wav_2: str | None = None, fps: int = 25) -> int:
+def calculate_max_frames_from_audio(wav_path, wav_path_2=None, fps=25):
+    """Calculate max_frames based on the longest audio."""
     durations = []
-    d1 = get_audio_duration(wav_1)
+    d1 = get_audio_duration(wav_path)
     if d1 is not None:
         durations.append(d1)
-        logger.info(f"Audio#1 duration: {d1:.2f}s")
-    if wav_2:
-        d2 = get_audio_duration(wav_2)
+        logger.info(f"Audio #1 duration: {d1:.2f}s")
+    if wav_path_2:
+        d2 = get_audio_duration(wav_path_2)
         if d2 is not None:
             durations.append(d2)
-            logger.info(f"Audio#2 duration: {d2:.2f}s")
+            logger.info(f"Audio #2 duration: {d2:.2f}s")
     if not durations:
-        logger.warning("Audio duration unknown; using default 81 frames.")
+        logger.warning("Could not determine audio duration - using default 81 frames.")
         return 81
     max_duration = max(durations)
     max_frames = int(max_duration * fps) + 81
     logger.info(f"Longest audio {max_duration:.2f}s -> max_frames {max_frames}")
     return max_frames
 
-def pick_dimensions(aspect_ratio: str | None, resolution: str | None) -> tuple[int, int]:
-    """
-    Choose (width, height) from aspect_ratio + resolution.
-    Valid aspect_ratio: "16:9" or "9:16" (default 9:16 if missing/invalid).
-    Valid resolution: "480p" or "720p" (default 480p if missing/invalid).
-    Mappings:
-      16:9  -> 854x480 or 1280x720
-      9:16  -> 480x854 or 720x1280
-    """
-    ar = (aspect_ratio or "9:16").strip()
-    res = (resolution or "480p").strip().lower()
-
-    if ar not in {"16:9", "9:16"}:
-        logger.info(f"Invalid/missing aspect_ratio '{aspect_ratio}', defaulting to 9:16.")
-        ar = "9:16"
-    if res not in {"480p", "720p"}:
-        logger.info(f"Invalid/missing resolution '{resolution}', defaulting to 480p.")
-        res = "480p"
-
-    if ar == "16:9":
-        return (1280, 720) if res == "720p" else (854, 480)
-    else:  # 9:16
-        return (720, 1280) if res == "720p" else (480, 854)
-
 # -----------------------------
 # Main handler
 # -----------------------------
 def handler(job):
     job_input = job.get("input", {})
-
     logger.info(f"Received job input: {job_input}")
+
     task_id = f"task_{uuid.uuid4()}"
-    task_dir = os.path.abspath(task_id)
-    os.makedirs(task_dir, exist_ok=True)
 
-    try:
-        # Reject width/height if present; only aspect_ratio + resolution are allowed
-        if "width" in job_input or "height" in job_input:
-            return {"error": "Inputs 'width' and 'height' are not allowed. Use 'aspect_ratio' and 'resolution'."}
+    # Input type and number of persons
+    input_type = job_input.get("input_type", "image")  # "image" or "video"
+    person_count = job_input.get("person_count", "single")  # "single" or "multi"
+    logger.info(f"Workflow: type={input_type}, persons={person_count}")
 
-        # Input type & persons
-        input_type = job_input.get("input_type", "image")          # "image" | "video"
-        person_count = job_input.get("person_count", "single")     # "single" | "multi"
-        
-        if input_type not in {"image", "video"}:
-            return {"error": f"Invalid input_type '{input_type}'. Must be 'image' or 'video'."}
-        if person_count not in {"single", "multi"}:
-            return {"error": f"Invalid person_count '{person_count}'. Must be 'single' or 'multi'."}
-        
-        logger.info(f"Workflow: type={input_type}, persons={person_count}")
+    # Workflow file path
+    workflow_path = get_workflow_path(input_type, person_count)
+    logger.info(f"Using workflow: {workflow_path}")
 
-        # Workflow
-        workflow_path = get_workflow_path(input_type, person_count)
-        logger.info(f"Using workflow: {workflow_path}")
-
-        # URL-only media inputs
-        media_local_path = None
-        if input_type == "image":
+    # -----------------------------
+    # Media input
+    # -----------------------------
+    media_path = None
+    if input_type == "image":
+        if "image_path" in job_input:
+            media_path = process_input(job_input["image_path"], task_id, "input_image.jpg", "path")
+        elif "image_url" in job_input:
+            media_path = process_input(job_input["image_url"], task_id, "input_image.jpg", "url")
+        elif "image_base64" in job_input:
+            media_path = process_input(job_input["image_base64"], task_id, "input_image.jpg", "base64")
+        else:
+            # Default to S3-hosted sample image
             default_img = DEFAULT_MULTI_IMAGE_URL if person_count == "multi" else DEFAULT_IMAGE_URL
-            image_url = ensure_url_only("image_url", job_input) or default_img
-            out_img = _out_with_ext(image_url, os.path.join(task_dir, "input_image"), default_ext=".png")
-            media_local_path = download_file_from_url(image_url, out_img)
-            if not job_input.get("image_url"):
-                which = "multi default" if person_count == "multi" else "single default"
-                logger.info(f"No image_url was provided; using {which} image URL.")
+            media_path = process_input(default_img, task_id, "input_image.jpg", "url")
+            logger.info("No image provided - using default S3 image URL.")
+    else:
+        if "video_path" in job_input:
+            media_path = process_input(job_input["video_path"], task_id, "input_video.mp4", "path")
+        elif "video_url" in job_input:
+            media_path = process_input(job_input["video_url"], task_id, "input_video.mp4", "url")
+        elif "video_base64" in job_input:
+            media_path = process_input(job_input["video_base64"], task_id, "input_video.mp4", "base64")
         else:
-            video_url = ensure_url_only("video_url", job_input)
-            if not video_url:
-                return {"error": "For input_type='video', you must provide 'video_url'."}
-            out_vid = _out_with_ext(video_url, os.path.join(task_dir, "input_video"), default_ext=".mp4")
-            media_local_path = download_file_from_url(video_url, out_vid)
+            # Keep original behavior - fall back to an image if no video provided
+            default_img = DEFAULT_MULTI_IMAGE_URL if person_count == "multi" else DEFAULT_IMAGE_URL
+            media_path = process_input(default_img, task_id, "input_image.jpg", "url")
+            logger.info("No video provided - falling back to default S3 image URL.")
 
-        # Audio (URL-only)
-        wav_path_1 = None
-        wav_path_2 = None
+    # -----------------------------
+    # Audio input
+    # -----------------------------
+    wav_path = None
+    wav_path_2 = None
 
+    if "wav_path" in job_input:
+        wav_path = process_input(job_input["wav_path"], task_id, "input_audio.wav", "path")
+    elif "wav_url" in job_input:
+        wav_path = process_input(job_input["wav_url"], task_id, "input_audio.wav", "url")
+    elif "wav_base64" in job_input:
+        wav_path = process_input(job_input["wav_base64"], task_id, "input_audio.wav", "base64")
+    else:
+        # Default to S3-hosted sample audio
         default_audio_1 = DEFAULT_MULTI_AUDIO_URL_1 if person_count == "multi" else DEFAULT_AUDIO_URL
-        wav_url = ensure_url_only("wav_url", job_input) or default_audio_1
-        out = _out_with_ext(wav_url, os.path.join(task_dir, "input_audio"), default_ext=".wav")
-        wav_path_1 = download_file_from_url(wav_url, out)
-        if not job_input.get("wav_url"):
-            which = "multi default #1" if person_count == "multi" else "single default"
-            logger.info(f"No wav_url provided; using {which} audio URL.")
+        wav_path = process_input(default_audio_1, task_id, "input_audio.wav", "url")
+        logger.info("No wav provided - using default S3 audio URL.")
 
-        if person_count == "multi":
-            wav_url_2 = ensure_url_only("wav_url_2", job_input) or DEFAULT_MULTI_AUDIO_URL_2
-            out2 = _out_with_ext(wav_url_2, os.path.join(task_dir, "input_audio_2"), default_ext=".wav")
-            wav_path_2 = download_file_from_url(wav_url_2, out2)
-            if not job_input.get("wav_url_2"):
-                logger.info("No wav_url_2 provided; using multi default #2 audio URL.")
-
-        # Text and derived size
-        prompt_text = job_input.get("prompt", "A person talking naturally")
-
-        # Always derive width/height from aspect_ratio + resolution (defaults: 9:16 @ 480p)
-        ar = job_input.get("aspect_ratio")
-        res = job_input.get("resolution")
-        width, height = pick_dimensions(ar, res)
-        logger.info(f"Using dimensions from aspect_ratio/resolution -> width={width}, height={height}")
-
-        # max_frame auto by audio length unless user provides
-        max_frame = job_input.get("max_frame")
-        if max_frame is None:
-            logger.info("max_frame not provided; deriving from audio duration.")
-            max_frame = calculate_max_frames_from_audio(wav_path_1, wav_path_2 if person_count == "multi" else None)
+    if person_count == "multi":
+        if "wav_path_2" in job_input:
+            wav_path_2 = process_input(job_input["wav_path_2"], task_id, "input_audio_2.wav", "path")
+        elif "wav_url_2" in job_input:
+            wav_path_2 = process_input(job_input["wav_url_2"], task_id, "input_audio_2.wav", "url")
+        elif "wav_base64_2" in job_input:
+            wav_path_2 = process_input(job_input["wav_base64_2"], task_id, "input_audio_2.wav", "base64")
         else:
-            logger.info(f"Using user-specified max_frame: {max_frame}")
+            # Use second default S3 audio for multi
+            wav_path_2 = process_input(DEFAULT_MULTI_AUDIO_URL_2, task_id, "input_audio_2.wav", "url")
+            logger.info("No second wav provided - using default S3 audio URL for #2.")
 
-        logger.info(f"Settings: prompt='{prompt_text}', width={width}, height={height}, max_frame={max_frame}")
-        logger.info(f"Media path: {media_local_path}")
-        logger.info(f"Audio #1: {wav_path_1}")
-        if person_count == "multi":
-            logger.info(f"Audio #2: {wav_path_2}")
+    # --------------------------------
+    # Prompt and sizing - keep as-is
+    # --------------------------------
+    prompt_text = job_input.get("prompt", "A person talking naturally")
+    width = job_input.get("width", 512)
+    height = job_input.get("height", 512)
 
-        # Load and fill workflow
-        prompt = load_workflow(workflow_path)
-        
-        # Validate workflow has required nodes
-        validate_workflow_nodes(prompt, input_type, person_count)
+    max_frame = job_input.get("max_frame")
+    if max_frame is None:
+        logger.info("max_frame not provided - deriving from audio duration.")
+        max_frame = calculate_max_frames_from_audio(wav_path, wav_path_2 if person_count == "multi" else None)
+    else:
+        logger.info(f"Using user-specified max_frame: {max_frame}")
 
-        # OPTIMIZE WORKFLOW FOR GPU (dynamically adjust settings based on VRAM and video length)
-        prompt = optimize_workflow_for_gpu(prompt, max_frames=max_frame)
+    logger.info(f"Settings: prompt='{prompt_text}', width={width}, height={height}, max_frame={max_frame}")
+    logger.info(f"Media path: {media_path}")
+    logger.info(f"Audio #1: {wav_path}")
+    if person_count == "multi":
+        logger.info(f"Audio #2: {wav_path_2}")
 
-        # Existence and validation checks
-        if not os.path.exists(media_local_path):
-            return {"error": f"Media file not found: {media_local_path}"}
-        if os.path.getsize(media_local_path) == 0:
-            return {"error": f"Media file is empty: {media_local_path}"}
-            
-        if not os.path.exists(wav_path_1):
-            return {"error": f"Audio file not found: {wav_path_1}"}
-        if os.path.getsize(wav_path_1) == 0:
-            return {"error": f"Audio file is empty: {wav_path_1}"}
-            
-        if person_count == "multi" and wav_path_2:
-            if not os.path.exists(wav_path_2):
-                return {"error": f"Second audio file not found: {wav_path_2}"}
-            if os.path.getsize(wav_path_2) == 0:
-                return {"error": f"Second audio file is empty: {wav_path_2}"}
+    # Load workflow
+    prompt = load_workflow(workflow_path)
 
-        logger.info(f"Media size: {os.path.getsize(media_local_path)} bytes")
-        logger.info(f"Audio #1 size: {os.path.getsize(wav_path_1)} bytes")
-        if person_count == "multi" and wav_path_2:
-            logger.info(f"Audio #2 size: {os.path.getsize(wav_path_2)} bytes")
+    # Existence checks
+    if not os.path.exists(media_path):
+        logger.error(f"Media file does not exist: {media_path}")
+        return {"error": f"Media file not found: {media_path}"}
+    if not os.path.exists(wav_path):
+        logger.error(f"Audio file does not exist: {wav_path}")
+        return {"error": f"Audio file not found: {wav_path}"}
+    if person_count == "multi" and wav_path_2 and not os.path.exists(wav_path_2):
+        logger.error(f"Second audio file does not exist: {wav_path_2}")
+        return {"error": f"Second audio file not found: {wav_path_2}"}
 
-        # Bind inputs to workflow (using absolute paths)
-        if input_type == "image":
-            prompt["284"]["inputs"]["image"] = media_local_path
-        else:
-            prompt["228"]["inputs"]["video"] = media_local_path
+    logger.info(f"Media size: {os.path.getsize(media_path)} bytes")
+    logger.info(f"Audio #1 size: {os.path.getsize(wav_path)} bytes")
+    if person_count == "multi" and wav_path_2:
+        logger.info(f"Audio #2 size: {os.path.getsize(wav_path_2)} bytes")
 
-        prompt["125"]["inputs"]["audio"] = wav_path_1
-        prompt["241"]["inputs"]["positive_prompt"] = prompt_text
-        prompt["245"]["inputs"]["value"] = width
-        prompt["246"]["inputs"]["value"] = height
-        prompt["270"]["inputs"]["value"] = max_frame
+    # Bind inputs to workflow
+    if input_type == "image":
+        prompt["284"]["inputs"]["image"] = media_path
+    else:
+        prompt["228"]["inputs"]["video"] = media_path
 
-        if person_count == "multi":
-            # I2V_multi.json uses node 307, V2V_multi.json uses node 313
-            audio_2_node = "307" if input_type == "image" else "313"
-            if audio_2_node not in prompt:
-                return {"error": f"Expected node {audio_2_node} not found in {input_type} multi workflow"}
-            prompt[audio_2_node]["inputs"]["audio"] = wav_path_2
+    prompt["125"]["inputs"]["audio"] = wav_path
+    prompt["241"]["inputs"]["positive_prompt"] = prompt_text
+    prompt["245"]["inputs"]["value"] = width
+    prompt["246"]["inputs"]["value"] = height
+    prompt["270"]["inputs"]["value"] = max_frame
 
-        # Connectivity checks
-        ws_url = f"ws://{SERVER_ADDRESS}:8188/ws?clientId={CLIENT_ID}"
-        http_url = f"http://{SERVER_ADDRESS}:8188/"
-        logger.info(f"Connecting to ComfyUI: {http_url} (ws={ws_url})")
+    if person_count == "multi":
+        if input_type == "image":  # I2V_multi.json
+            if "307" in prompt:
+                prompt["307"]["inputs"]["audio"] = wav_path_2
+        else:  # V2V_multi.json
+            if "313" in prompt:
+                prompt["313"]["inputs"]["audio"] = wav_path_2
 
-        # Wait for HTTP up (<= 5 min for cold starts)
-        for attempt in range(300):
-            try:
-                urllib.request.urlopen(http_url, timeout=5)
-                logger.info(f"HTTP connection OK (attempt {attempt+1})")
-                break
-            except Exception:
-                if attempt == 299:
-                    raise Exception("Cannot reach ComfyUI HTTP endpoint after 5 minutes.")
-                time.sleep(1)
+    # Connectivity checks
+    ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
+    logger.info(f"Connecting to WebSocket: {ws_url}")
 
-        # WS connect (up to 5 min)
-        ws = websocket.WebSocket()
-        for attempt in range(60):  # 5s × 60 = 5 min
-            try:
-                ws.connect(ws_url)
-                logger.info(f"WebSocket connected (attempt {attempt+1})")
-                break
-            except Exception as e:
-                if attempt == 59:
-                    raise Exception(f"WebSocket connect timeout after 5 minutes. Last error: {e}")
-                time.sleep(5)
+    http_url = f"http://{server_address}:8188/"
+    logger.info(f"Checking HTTP connection: {http_url}")
 
-        # Run and collect output paths
-        video_paths_by_node = get_video_filepaths(ws, prompt, input_type, person_count)
-        ws.close()
+    # Wait for HTTP up (<= 3 minutes)
+    max_http_attempts = 180
+    for http_attempt in range(max_http_attempts):
+        try:
+            urllib.request.urlopen(http_url, timeout=5)
+            logger.info(f"HTTP OK (attempt {http_attempt+1})")
+            break
+        except Exception as e:
+            logger.warning(f"HTTP connect failed (attempt {http_attempt+1}/{max_http_attempts}): {e}")
+            if http_attempt == max_http_attempts - 1:
+                return {"error": "Cannot reach ComfyUI HTTP endpoint."}
+            time.sleep(1)
 
-        # Return the first available video
-        for node_id, paths in video_paths_by_node.items():
-            for p in paths:
-                if os.path.exists(p):
-                    if s3_configured():
-                        try:
-                            url = s3_upload_and_url(p)
-                            logger.info(f"Uploaded to S3: {url}")
-                            return {"video_url": url}
-                        except Exception as e:
-                            logger.error(f"S3 upload failed, falling back to base64. Error: {e}")
+    ws = websocket.WebSocket()
+    # WebSocket connect - up to 3 minutes
+    max_attempts = int(180 / 5)
+    for attempt in range(max_attempts):
+        try:
+            ws.connect(ws_url)
+            logger.info(f"WebSocket connected (attempt {attempt+1})")
+            break
+        except Exception as e:
+            logger.warning(f"WebSocket connect failed (attempt {attempt+1}/{max_attempts}): {e}")
+            if attempt == max_attempts - 1:
+                return {"error": "WebSocket connect timeout (3 minutes)"}
+            time.sleep(5)
 
-                    # Fallback: base64 data URL
-                    with open(p, "rb") as f:
-                        b64 = base64.b64encode(f.read()).decode("utf-8")
-                    logger.info(f"Returning base64 video ({len(b64)} chars)")
-                    return {"video": f"data:video/mp4;base64,{b64}"}
+    # Run and collect output paths
+    video_paths_by_node = get_video_filepaths(ws, prompt, input_type, person_count)
+    ws.close()
 
-        return {"error": "No video file was produced by the workflow."}
+    # Return the first available video - upload to S3 if configured else base64
+    for node_id, paths in video_paths_by_node.items():
+        for p in paths:
+            if os.path.exists(p):
+                if s3_configured():
+                    try:
+                        url = s3_upload_and_url(p)
+                        logger.info(f"Uploaded to S3: {url}")
+                        return {"video_url": url}
+                    except Exception as e:
+                        logger.error(f"S3 upload failed, falling back to base64. Error: {e}")
 
-    except Exception as e:
-        logger.error(f"Handler error: {e}", exc_info=True)
-        return {"error": str(e)}
+                with open(p, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                logger.info(f"Returning base64 video ({len(b64)} chars)")
+                return {"video": f"data:video/mp4;base64,{b64}"}
+
+    return {"error": "No video file was produced by the workflow."}
 
 runpod.serverless.start({"handler": handler})
