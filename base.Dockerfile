@@ -1,3 +1,4 @@
+# base.Dockerfile
 # Base with CUDA 12.8 (matches torch cu128)
 FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04 AS runtime
 
@@ -14,6 +15,9 @@ ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
 
 # Build for common GPUs incl. Blackwell (SM120)
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0"
+
+# Ensure any future "torch" pulls resolve to cu128 wheels
+ENV PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu128
 
 # Hugging Face faster downloads
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
@@ -49,7 +53,11 @@ RUN pip install \
     torchvision==0.22.0+cu128 \
     torchaudio==2.7.0+cu128 \
     --index-url https://download.pytorch.org/whl/cu128 && \
-    pip install xformers==0.0.30
+    pip install xformers==0.0.30 && \
+    python - <<'PY'
+import torch
+print("[Torch pinned]", torch.__version__, "CUDA", torch.version.cuda)
+PY
 
 # (Optional) If you plan to use sageattention explicitly, it’s usually bundled by nodes,
 # but installing the wheel here is harmless. Uncomment if needed:
@@ -77,7 +85,5 @@ RUN pip install runpod websocket-client && \
     pip install -U "huggingface_hub[hf_transfer]"
 
 # ---- Notes ----
-# docker build -t krypton8/multitalk-base:1.0 -f base.Dockerfile .
-# docker push krypton8/multitalk-base:1.0
-
-# If you previously published 1.0, bump the tag to 1.1 after this change.
+# docker build -t krypton8/multitalk-base:1.3 -f base.Dockerfile .
+# docker push -a krypton8/multitalk-base
