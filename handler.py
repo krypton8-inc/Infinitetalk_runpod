@@ -397,6 +397,24 @@ def handler(job):
         # Load workflow
         prompt = load_workflow(workflow_path)
 
+        # ---- Minimal fix: avoid SageAttention on unsupported GPUs (e.g., Blackwell SM 12.x) ----
+        try:
+            cc = subprocess.run(
+                ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+        except Exception:
+            cc = ""
+        if cc.startswith("12."):
+            changed = 0
+            for node_id, node in prompt.items():
+                inputs = node.get("inputs", {})
+                if "attention_mode" in inputs:
+                    inputs["attention_mode"] = "sdpa"
+                    changed += 1
+            logger.info(f"Blackwell GPU detected (SM {cc}). Forced attention_mode=sdpa on {changed} node(s).")
+        # ----------------------------------------------------------------------------------------
+
         # Existence checks
         if not os.path.exists(media_path):
             return {"error": f"Media file not found: {media_path}"}
